@@ -24,6 +24,7 @@ import {
   getUpmergePreview,
   getUpmergeStatus,
   relativeOriginalWorkspacePath,
+  revertRelativePath,
   resolveOriginalWorkspacePath,
   upmergeAll,
   upmergeRelativePath,
@@ -817,7 +818,7 @@ async function moveUpmergeSelection(delta: number) {
   updateSidebar();
 }
 
-async function runUpmergeSelection() {
+async function runUpmergeSelection(action: "upmerge" | "revert") {
   const selected = selectedUpmergeItem();
   if (!selected) {
     updateSidebar("No pending upmerges.");
@@ -825,11 +826,19 @@ async function runUpmergeSelection() {
     return;
   }
 
+  if (action === "revert" && selected.path === null) {
+    updateSidebar("Select a file to revert it.");
+    renderer.requestRender();
+    return;
+  }
+
   try {
     const message =
-      selected.path === null
-        ? await upmergeAll()
-        : await upmergeRelativePath(selected.path);
+      action === "upmerge"
+        ? selected.path === null
+          ? await upmergeAll()
+          : await upmergeRelativePath(selected.path)
+        : await revertRelativePath(selected.path!);
     appendEntry("system", message);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -964,6 +973,7 @@ function updateSidebar(note = "Ready for your next prompt.") {
       "",
       "Shortcuts",
       "Enter  upmerge selected item",
+      "r      revert selected file",
       "j / k  change selection",
       "u/Esc  close menu",
       "",
@@ -1018,7 +1028,7 @@ function updateComposerHint() {
 
   if (upmergeMenuOpen) {
     composerHint.content =
-      "Upmerge menu open. Enter applies the selected diff, u/Esc closes it.";
+      "Upmerge menu open. Enter upmerges the selection, r reverts a selected file, and u/Esc closes it.";
     return;
   }
 
@@ -1402,7 +1412,9 @@ function handleGlobalKey(key: KeyEvent) {
     } else if (key.name === "k" || key.name === "up") {
       void moveUpmergeSelection(-1);
     } else if (key.name === "enter" || key.name === "return") {
-      void runUpmergeSelection();
+      void runUpmergeSelection("upmerge");
+    } else if (key.name === "r") {
+      void runUpmergeSelection("revert");
     }
     return;
   }

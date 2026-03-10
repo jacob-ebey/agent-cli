@@ -613,6 +613,33 @@ export async function upmergeRelativePath(relativePath: string) {
   return `Upmerged ${relativePath} into the main workspace.`;
 }
 
+export async function revertRelativePath(relativePath: string) {
+  const status = await getUpmergeStatus();
+  if (status.mode !== "worktree") {
+    return status.note;
+  }
+  if (sessionState.mode !== "worktree") {
+    return status.note;
+  }
+
+  const record = getBaselineRecord(relativePath);
+  if (!record) {
+    return `No pending changes for ${relativePath}.`;
+  }
+
+  if (!(await hasPendingDiff(relativePath))) {
+    return `No pending changes for ${relativePath}.`;
+  }
+
+  const originalPath = path.join(ORIGINAL_WORKSPACE_ROOT, relativePath);
+  const worktreePath = path.join(sessionState.worktreeWorkspaceRoot, relativePath);
+  const current = await readWorkspaceVersion(originalPath);
+
+  await writeWorkspaceVersion(worktreePath, current.content);
+  await writeBaseline(relativePath, current.exists ? originalPath : null);
+  return `Reverted pending changes for ${relativePath}.`;
+}
+
 export async function upmergeAll() {
   const status = await getUpmergeStatus();
   if (status.mode !== "worktree") {
