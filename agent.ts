@@ -87,6 +87,8 @@ type PendingApproval = {
   resolve: (approved: boolean) => void;
 };
 
+type AutoScrollState = "follow" | "paused";
+
 type ModelPresetName = keyof typeof MODEL_PRESETS;
 type PersistedConfig = {
   currentModel?: string;
@@ -484,6 +486,7 @@ let upmergePanelAttached = false;
 let activeStreamAbortController: AbortController | null = null;
 const approvedEditTargets = new Set<string>();
 let pendingApproval: PendingApproval | null = null;
+let autoScrollState: AutoScrollState = "follow";
 let currentModel: string =
   persistedConfig.currentModel ?? MODEL_PRESETS.anthropic;
 
@@ -881,11 +884,24 @@ function setMode(nextMode: Mode) {
   renderer.requestRender();
 }
 
-function scrollToBottom() {
+function scrollToBottom(force = false) {
+  if (!force && autoScrollState !== "follow") {
+    return;
+  }
+
   process.nextTick(() => {
     transcript.scrollTo({ x: 0, y: Number.MAX_SAFE_INTEGER });
     renderer.requestRender();
   });
+}
+
+function pauseAutoScroll() {
+  autoScrollState = "paused";
+}
+
+function resumeAutoScroll() {
+  autoScrollState = "follow";
+  scrollToBottom(true);
 }
 
 function settlePendingApproval(approved: boolean) {
@@ -961,6 +977,7 @@ function updateSidebar(note = "Ready for your next prompt.") {
   sidebarText.content = [
     `Status: ${busy ? "streaming" : "idle"}`,
     `Mode: ${mode}`,
+    `Scroll: ${autoScrollState}`,
     `Messages: ${entries.length}`,
     `Model: ${currentModel}`,
     `Edits: ${upmergeMode}`,
@@ -970,6 +987,7 @@ function updateSidebar(note = "Ready for your next prompt.") {
     "i      insert mode",
     ":      command mode",
     "j / k  scroll transcript",
+    "G      jump to live bottom",
     "u      upmerge menu",
     "Esc    normal mode",
     "Ctrl+C abort stream",
@@ -1006,7 +1024,9 @@ function updateComposerHint() {
 
   if (busy) {
     composerHint.content =
-      "The agent is responding. Press Ctrl+C to abort, or use j and k to inspect earlier messages.";
+      autoScrollState === "paused"
+        ? "The agent is responding. Auto-scroll is paused while you audit earlier output. Press G to jump back to the live bottom, or Ctrl+C to abort."
+        : "The agent is responding. Press Ctrl+C to abort, or use j and k to inspect earlier messages.";
     return;
   }
 
@@ -1081,6 +1101,7 @@ function resetConversation() {
   insertDraft = "";
   commandDraft = "";
   input.setText("");
+  autoScrollState = "follow";
   updateSidebar("Conversation reset.");
   setMode("normal");
 }
@@ -1414,14 +1435,39 @@ function handleGlobalKey(key: KeyEvent) {
   }
 
   if (key.name === "j") {
+    pauseAutoScroll();
     transcript.scrollBy({ x: 0, y: 3 });
+    updateSidebar(
+      busy
+        ? "Auto-scroll paused while streaming."
+        : "Auto-scroll paused while you inspect the transcript."
+    );
+    updateComposerHint();
     renderer.requestRender();
     return;
   }
 
   if (key.name === "k") {
+    pauseAutoScroll();
     transcript.scrollBy({ x: 0, y: -3 });
+    updateSidebar(
+      busy
+        ? "Auto-scroll paused while streaming."
+        : "Auto-scroll paused while you inspect the transcript."
+    );
+    updateComposerHint();
     renderer.requestRender();
+    return;
+  }
+
+  if (key.name === "g" && key.shift) {
+    resumeAutoScroll();
+    updateSidebar(
+      busy
+        ? "Jumped back to the live bottom."
+        : "Jumped to the bottom of the transcript."
+    );
+    updateComposerHint();
   }
 }
 
