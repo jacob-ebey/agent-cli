@@ -33,6 +33,7 @@ import {
 const WORKSPACE_ROOT = process.cwd();
 const TOOLS_DIRECTORY = "tools";
 const SYSTEM_PROMPT_PATH = path.join(TOOLS_DIRECTORY, "system-prompt.md");
+const ROOT_AGENTS_PATH = path.join(WORKSPACE_ROOT, "AGENTS.md");
 const MODEL_PRESETS = {
   anthropic: "anthropic:claude-sonnet-4-6",
   openai: "openai:gpt-5.4",
@@ -49,6 +50,7 @@ const CONFIG_DIRECTORY =
         "agent-cli"
       );
 const CONFIG_PATH = path.join(CONFIG_DIRECTORY, "config.json");
+const SHELL_APPROVALS_PATH = path.join(WORKSPACE_ROOT, ".agents", "shell.json");
 
 type ChatRole = "assistant" | "user" | "system" | "error";
 type Mode = "normal" | "insert" | "command";
@@ -64,8 +66,14 @@ type ToolExecutor = (
   argumentsObject: Record<string, unknown>
 ) => Promise<string>;
 
+type ApprovalScope = "path" | "command";
+type ApprovalPersistence = "session" | "persisted";
+type ApprovalDecision = "deny" | "once" | "session" | "always";
+
 type ToolMetadata = {
   requiresApproval: boolean;
+  approvalScope: ApprovalScope;
+  approvalPersistence: ApprovalPersistence;
 };
 
 type ToolDefinition = Pick<Tool, "name" | "description" | "inputSchema">;
@@ -84,8 +92,10 @@ type UpmergeMenuItem = {
 type PendingApproval = {
   toolName: string;
   approvalKey: string;
-  displayPath: string;
-  resolve: (approved: boolean) => void;
+  displayLabel: string;
+  displayValue: string;
+  approvalPersistence: ApprovalPersistence;
+  resolve: (decision: ApprovalDecision) => void;
 };
 
 type AutoScrollState = "follow" | "paused";
@@ -93,6 +103,11 @@ type AutoScrollState = "follow" | "paused";
 type ModelPresetName = keyof typeof MODEL_PRESETS;
 type PersistedConfig = {
   currentModel?: string;
+};
+
+type PersistedShellApprovals = {
+  version: 1;
+  approvedCommands: string[];
 };
 
 function normalizeWhitespace(value: string) {
@@ -130,6 +145,92 @@ async function savePersistedConfig(config: PersistedConfig) {
   );
 }
 
+function parsePersistedShellCommand(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+async function loadPersistedShellApprovals() {
+  try {
+    const source = await fs.readFile(SHELL_APPROVALS_PATH, "utf-8");
+    const parsed = JSON.parse(source) as {
+      approvedCommands?: unknown;
+    };
+    const approvedCommands = Array.isArray(parsed.approvedCommands)
+      ? parsed.approvedCommands
+          .map((entry) => parsePersistedShellCommand(entry))
+          .filter((entry): entry is string => entry !== null)
+      : [];
+
+    return new Set(approvedCommands);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return new Set<string>();
+    }
+
+    console.warn(
+      `Failed to load shell approvals from ${SHELL_APPROVALS_PATH}:`,
+      error
+    );
+    return new Set<string>();
+  }
+}
+
+async function savePersistedShellApprovals(approvedCommands: Set<string>) {
+  const payload: PersistedShellApprovals = {
+    version: 1,
+    approvedCommands: [...approvedCommands].sort((left, right) =>
+      left.localeCompare(right)
+    ),
+  };
+
+  await fs.mkdir(path.dirname(SHELL_APPROVALS_PATH), { recursive: true });
+  await fs.writeFile(
+    SHELL_APPROVALS_PATH,
+    `${JSON.stringify(payload, null, 2)}\n`,
+    "utf-8"
+  );
+}
+
+async function loadRootAgentsGuidance() {
+  try {
+    const source = await fs.readFile(ROOT_AGENTS_PATH, "utf-8");
+    const trimmedSource = source.trim();
+    if (!trimmedSource) {
+      return null;
+    }
+
+    return [
+      "Additional repository guidance from the workspace root `AGENTS.md` file:",
+      "",
+      "<AGENTS.md>",
+      trimmedSource,
+      "</AGENTS.md>",
+    ].join("\n");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+async function loadInitialSystemMessage() {
+  const [baseSystemPrompt, rootAgentsGuidance] = await Promise.all([
+    fs.readFile(SYSTEM_PROMPT_PATH, "utf-8"),
+    loadRootAgentsGuidance(),
+  ]);
+
+  return [
+    baseSystemPrompt,
+    "You are running inside a prototype OpenTUI chat interface.",
+    "Use the available tools when they would help you inspect the workspace before answering.",
+    rootAgentsGuidance,
+  ]
+    .filter((part) => part && part.trim())
+    .join("\n\n");
+}
+
 function parseToolDefinition(source: string): ToolDefinition | null {
   const nameMatch = source.match(/^#\s*`?([a-zA-Z0-9_-]+)`?\s*$/m);
   const descriptionMatch = source.match(
@@ -157,15 +258,22 @@ function parseToolMetadata(source: string): ToolMetadata {
   if (!metadataMatch) {
     return {
       requiresApproval: false,
+      approvalScope: "path",
+      approvalPersistence: "session",
     };
   }
 
   const parsed = JSON.parse(metadataMatch[1]) as {
     requiresApproval?: unknown;
+    approvalScope?: unknown;
+    approvalPersistence?: unknown;
   };
 
   return {
     requiresApproval: parsed.requiresApproval === true,
+    approvalScope: parsed.approvalScope === "command" ? "command" : "path",
+    approvalPersistence:
+      parsed.approvalPersistence === "persisted" ? "persisted" : "session",
   };
 }
 
@@ -317,7 +425,7 @@ function summarizeToolResult(
       const indexedChunks = matchOutputLabel(output, "Indexed chunks");
       const resultsCount =
         typeof output === "string"
-          ? Array.from(output.matchAll(/^\d+\.\s/mg)).length
+          ? Array.from(output.matchAll(/^\d+\.\s/gm)).length
           : null;
 
       return [
@@ -326,6 +434,22 @@ function summarizeToolResult(
           : "Searched indexed skills.",
         resultsCount !== null ? `${resultsCount} result(s).` : null,
         indexedChunks ? `Indexed chunks available: ${indexedChunks}.` : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
+    case "run_shell_command": {
+      const command = readStringArgument(argumentsObject, "command");
+      const requestedPath = readStringArgument(argumentsObject, "cwd") ?? ".";
+      const exitCode = matchOutputLabel(output, "Exit code");
+      const timedOut = matchOutputLabel(output, "Timed out");
+
+      return [
+        command
+          ? `Ran shell command \`${command}\` from \`${requestedPath}\`.`
+          : `Ran a shell command from \`${requestedPath}\`.`,
+        exitCode ? `Exit code: ${exitCode}.` : null,
+        timedOut ? `Timed out: ${timedOut}.` : null,
       ]
         .filter(Boolean)
         .join("\n");
@@ -386,15 +510,31 @@ function getApprovalTarget(
     return null;
   }
 
-  const requestedPath = argumentsObject.path;
-  if (typeof requestedPath !== "string" || !requestedPath.trim()) {
+  if (tool.metadata.approvalScope === "command") {
+    const command = readStringArgument(argumentsObject, "command");
+    if (!command) {
+      return null;
+    }
+
+    return {
+      approvalKey: command,
+      displayLabel: "Command",
+      displayValue: command,
+      approvalPersistence: tool.metadata.approvalPersistence,
+    };
+  }
+
+  const requestedPath = readStringArgument(argumentsObject, "path");
+  if (!requestedPath) {
     return null;
   }
 
   const originalPath = resolveOriginalWorkspacePath(requestedPath);
   return {
     approvalKey: originalPath,
-    displayPath: relativeOriginalWorkspacePath(originalPath),
+    displayLabel: "File",
+    displayValue: relativeOriginalWorkspacePath(originalPath),
+    approvalPersistence: tool.metadata.approvalPersistence,
   };
 }
 
@@ -404,40 +544,73 @@ async function ensureToolApproval(
   argumentsObject: Record<string, unknown>
 ) {
   const target = getApprovalTarget(tool, argumentsObject);
-  if (!target || approvedEditTargets.has(target.approvalKey)) {
+  if (!target) {
     return;
   }
 
-  const approved = await new Promise<boolean>((resolve) => {
+  if (
+    target.approvalPersistence === "session" &&
+    approvedEditTargets.has(target.approvalKey)
+  ) {
+    return;
+  }
+
+  if (
+    target.approvalPersistence === "persisted" &&
+    approvedShellCommands.has(target.approvalKey)
+  ) {
+    return;
+  }
+
+  const decision = await new Promise<ApprovalDecision>((resolve) => {
     pendingApproval = {
       toolName,
       approvalKey: target.approvalKey,
-      displayPath: target.displayPath,
+      displayLabel: target.displayLabel,
+      displayValue: target.displayValue,
+      approvalPersistence: target.approvalPersistence,
       resolve,
     };
+
+    const approvalPrompt =
+      target.approvalPersistence === "persisted"
+        ? `Press \`y\` to approve this command once, \`a\` to always approve this exact command, or \`n\` to deny.`
+        : `Press \`y\` to approve edits to this file for the rest of the session, or \`n\` to deny.`;
+
     appendEntry(
       "system",
       [
-        `Approval required before \`${toolName}\` can edit \`${target.displayPath}\`.`,
+        `Approval required before \`${toolName}\` can access ${target.displayLabel.toLowerCase()} \`${
+          target.displayValue
+        }\`.`,
         "",
-        "Press `y` to approve edits to this file for the rest of the session, or `n` to deny.",
+        approvalPrompt,
       ].join("\n")
     );
-    updateSidebar(`Waiting for approval to edit ${target.displayPath}.`);
+    updateSidebar(
+      `Waiting for approval for ${target.displayLabel.toLowerCase()} ${
+        target.displayValue
+      }.`
+    );
     updateComposerHint();
     renderer.requestRender();
   });
 
-  if (!approved) {
-    throw new Error(`Edit not approved for ${target.displayPath}.`);
+  if (decision === "deny") {
+    throw new Error(
+      `${target.displayLabel} not approved: ${target.displayValue}.`
+    );
   }
 }
 
-const [systemPrompt, loadedTools] = await Promise.all([
-  fs.readFile(SYSTEM_PROMPT_PATH, "utf-8"),
+const [initialSystemMessage, loadedTools] = await Promise.all([
+  loadInitialSystemMessage(),
   loadTools(),
 ]);
-const persistedConfig = await loadPersistedConfig();
+const [persistedConfig, approvedShellCommands] = await Promise.all([
+  loadPersistedConfig(),
+  loadPersistedShellApprovals(),
+]);
 const tools = Array.from(loadedTools.values(), (tool) => ({
   name: tool.definition.name,
   description: tool.definition.description,
@@ -464,10 +637,7 @@ renderer.setBackgroundColor("#0b1020");
 const conversation: Message[] = [
   {
     role: "system",
-    content: `${systemPrompt}
-
-You are running inside a prototype OpenTUI chat interface.
-Use the available tools when they would help you inspect the workspace before answering.`,
+    content: initialSystemMessage,
   },
 ];
 
@@ -492,7 +662,7 @@ let currentModel: string =
   persistedConfig.currentModel ?? MODEL_PRESETS.anthropic;
 
 function updateTranscriptTitle() {
-  transcriptPanel.title = busy ? "Conversation [working]" : "Conversation";
+  transcriptPanel.title = busy ? "Conversation [...]" : "Conversation";
 }
 
 function setBusy(nextBusy: boolean) {
@@ -940,41 +1110,87 @@ function resumeAutoScroll() {
   scrollToBottom(true);
 }
 
-function settlePendingApproval(approved: boolean) {
+async function settlePendingApproval(decision: ApprovalDecision) {
   const request = pendingApproval;
   if (!request) {
     return;
   }
 
   pendingApproval = null;
-  if (approved) {
+
+  if (decision === "session") {
     approvedEditTargets.add(request.approvalKey);
     appendEntry(
       "system",
-      `Approved edits to \`${request.displayPath}\` for the rest of this session.`
+      `Approved edits to \`${request.displayValue}\` for the rest of this session.`
     );
-    updateSidebar(`Approved edits to ${request.displayPath}.`);
+    updateSidebar(`Approved edits to ${request.displayValue}.`);
+  } else if (decision === "once") {
+    appendEntry(
+      "system",
+      `Approved ${request.displayLabel.toLowerCase()} \`${
+        request.displayValue
+      }\` once.`
+    );
+    updateSidebar(`Approved ${request.displayLabel.toLowerCase()} once.`);
+  } else if (decision === "always") {
+    approvedShellCommands.add(request.approvalKey);
+    try {
+      await savePersistedShellApprovals(approvedShellCommands);
+      appendEntry(
+        "system",
+        `Always approved command \`${request.displayValue}\`. Saved to \`.agents/shell.json\`.`
+      );
+      updateSidebar(`Saved approval for command ${request.displayValue}.`);
+    } catch (error) {
+      approvedShellCommands.delete(request.approvalKey);
+      const message = error instanceof Error ? error.message : String(error);
+      appendEntry(
+        "error",
+        `Failed to save shell approval for \`${request.displayValue}\`: ${message}`
+      );
+      updateSidebar(`Failed to save approval for ${request.displayValue}.`);
+      updateComposerHint();
+      renderer.requestRender();
+      request.resolve("deny");
+      return;
+    }
   } else {
-    appendEntry("system", `Denied edits to \`${request.displayPath}\`.`);
-    updateSidebar(`Denied edits to ${request.displayPath}.`);
+    appendEntry(
+      "system",
+      `Denied ${request.displayLabel.toLowerCase()} \`${
+        request.displayValue
+      }\`.`
+    );
+    updateSidebar(
+      `Denied ${request.displayLabel.toLowerCase()} ${request.displayValue}.`
+    );
   }
   updateComposerHint();
   renderer.requestRender();
-  request.resolve(approved);
+  request.resolve(decision);
 }
 
 function updateSidebar(note = "Ready for your next prompt.") {
   if (pendingApproval) {
+    const approvalShortcuts =
+      pendingApproval.approvalPersistence === "persisted"
+        ? [
+            "y      approve once",
+            "a      always approve this command",
+            "n/Esc  deny this command",
+          ]
+        : ["y      approve for session", "n/Esc  deny this edit"];
+
     sidebar.title = "Approval";
     sidebar.borderColor = "#f59e0b";
     sidebarText.content = [
       "Status: waiting",
       `Tool: ${pendingApproval.toolName}`,
-      `File: ${pendingApproval.displayPath}`,
+      `${pendingApproval.displayLabel}: ${pendingApproval.displayValue}`,
       "",
       "Shortcuts",
-      "y      approve for session",
-      "n/Esc  deny this edit",
+      ...approvalShortcuts,
       "",
       note,
     ].join("\n");
@@ -1014,10 +1230,8 @@ function updateSidebar(note = "Ready for your next prompt.") {
   sidebarText.content = [
     `Status: ${busy ? "streaming" : "idle"}`,
     `Mode: ${mode}`,
-    `Scroll: ${autoScrollState}`,
-    `Messages: ${entries.length}`,
     `Model: ${currentModel}`,
-    `Edits: ${upmergeMode}`,
+    `Messages: ${entries.length}`,
     `Upmerges: ${upmergeItems.length}`,
     "",
     "Shortcuts",
@@ -1035,11 +1249,6 @@ function updateSidebar(note = "Ready for your next prompt.") {
     ":model switch providers",
     ":quit  exit UI",
     "",
-    "Gateway",
-    "OPENAI_API_BASE",
-    "OPENAI_API_KEY",
-    "OPENAI_EMBEDDING_MODEL",
-    "",
     upmergeNote,
     "",
     note,
@@ -1049,7 +1258,9 @@ function updateSidebar(note = "Ready for your next prompt.") {
 function updateComposerHint() {
   if (pendingApproval) {
     composerHint.content =
-      "Approval required. Press y to allow this file for the session, or n to deny.";
+      pendingApproval.approvalPersistence === "persisted"
+        ? "Approval required. Press y to allow this command once, a to always allow this exact command, or n to deny."
+        : "Approval required. Press y to allow this file for the session, or n to deny.";
     return;
   }
 
@@ -1132,13 +1343,16 @@ function clearEntries() {
   entries.length = 0;
 }
 
-function resetConversation() {
+async function resetConversation() {
   activeStreamAbortController?.abort();
   activeStreamAbortController = null;
   pendingApproval = null;
   approvedEditTargets.clear();
   clearEntries();
-  conversation.splice(1);
+  conversation.splice(0, conversation.length, {
+    role: "system",
+    content: await loadInitialSystemMessage(),
+  });
   insertDraft = "";
   commandDraft = "";
   input.setText("");
@@ -1167,7 +1381,7 @@ async function executeCommand(raw: string) {
   }
 
   if (command === "clear") {
-    resetConversation();
+    await resetConversation();
     return;
   }
 
@@ -1430,9 +1644,16 @@ function handleGlobalKey(key: KeyEvent) {
 
   if (pendingApproval) {
     if (key.name === "y") {
-      settlePendingApproval(true);
+      void settlePendingApproval(
+        pendingApproval.approvalPersistence === "persisted" ? "once" : "session"
+      );
+    } else if (
+      pendingApproval.approvalPersistence === "persisted" &&
+      key.name === "a"
+    ) {
+      void settlePendingApproval("always");
     } else if (key.name === "n" || key.name === "escape") {
-      settlePendingApproval(false);
+      void settlePendingApproval("deny");
     }
     return;
   }
