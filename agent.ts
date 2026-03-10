@@ -491,6 +491,15 @@ let autoScrollState: AutoScrollState = "follow";
 let currentModel: string =
   persistedConfig.currentModel ?? MODEL_PRESETS.anthropic;
 
+function updateTranscriptTitle() {
+  transcriptPanel.title = busy ? "Conversation [working]" : "Conversation";
+}
+
+function setBusy(nextBusy: boolean) {
+  busy = nextBusy;
+  updateTranscriptTitle();
+}
+
 class ComposerTextarea extends TextareaRenderable {
   handleKeyPress(key: KeyEvent): boolean {
     if (key.name === "enter" || key.name === "return") {
@@ -723,8 +732,26 @@ function setComposerText(value: string) {
 }
 
 function moveComposerCursorToEnd(value: string) {
-  (input as TextareaRenderable & { cursorPosition: number }).cursorPosition =
-    value.length;
+  const desiredLength = value.length;
+
+  process.nextTick(() => {
+    const currentValue = input.plainText;
+    const currentLength = currentValue.length;
+
+    if (currentLength <= desiredLength) {
+      return;
+    }
+
+    for (let index = 0; index < currentLength - desiredLength; index += 1) {
+      input.handleKeyPress({
+        name: "left",
+        sequence: "",
+        ctrl: false,
+        meta: false,
+        shift: false,
+      } as KeyEvent);
+    }
+  });
 }
 
 function currentUpmergeItems() {
@@ -1106,14 +1133,20 @@ function clearEntries() {
 }
 
 function resetConversation() {
+  activeStreamAbortController?.abort();
+  activeStreamAbortController = null;
+  pendingApproval = null;
+  approvedEditTargets.clear();
   clearEntries();
   conversation.splice(1);
   insertDraft = "";
   commandDraft = "";
   input.setText("");
   autoScrollState = "follow";
+  updateComposerHint();
   updateSidebar("Conversation reset.");
   setMode("normal");
+  renderer.requestRender();
 }
 
 async function shutdown() {
@@ -1184,7 +1217,7 @@ async function executeCommand(raw: string) {
 
   if (command === "index") {
     commandDraft = "";
-    busy = true;
+    setBusy(true);
     setMode("normal");
     updateSidebar("Indexing skill files with embeddings...");
 
@@ -1209,7 +1242,7 @@ async function executeCommand(raw: string) {
       appendEntry("error", `Skill indexing failed.\n\n${message}`);
       updateSidebar("Skill indexing failed.");
     } finally {
-      busy = false;
+      setBusy(false);
       updateComposerHint();
       renderer.requestRender();
     }
@@ -1247,7 +1280,7 @@ async function submitPrompt() {
     content,
   });
 
-  busy = true;
+  setBusy(true);
   insertDraft = "";
   input.setText("");
   setMode("normal");
@@ -1366,7 +1399,7 @@ async function submitPrompt() {
       "Request failed. Check your model selection and AI provider credentials."
     );
   } finally {
-    busy = false;
+    setBusy(false);
     updateComposerHint();
     updateSidebar(
       streamAborted
