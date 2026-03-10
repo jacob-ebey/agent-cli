@@ -18,6 +18,7 @@ import {
   type ResponseChunk,
   type Tool,
 } from "./lib/llm.ts";
+import { indexSkills } from "./lib/skills-index.ts";
 import {
   cleanupWorkspaceSession,
   getUpmergePreview,
@@ -38,8 +39,14 @@ const MODEL_PRESETS = {
 } as const;
 const CONFIG_DIRECTORY =
   process.platform === "win32"
-    ? path.join(process.env.APPDATA ?? path.join(homedir(), "AppData", "Roaming"), "agent-cli")
-    : path.join(process.env.XDG_CONFIG_HOME ?? path.join(homedir(), ".config"), "agent-cli");
+    ? path.join(
+        process.env.APPDATA ?? path.join(homedir(), "AppData", "Roaming"),
+        "agent-cli"
+      )
+    : path.join(
+        process.env.XDG_CONFIG_HOME ?? path.join(homedir(), ".config"),
+        "agent-cli"
+      );
 const CONFIG_PATH = path.join(CONFIG_DIRECTORY, "config.json");
 
 type ChatRole = "assistant" | "user" | "system" | "error";
@@ -52,7 +59,9 @@ type ChatEntry = {
   body: TextRenderable;
 };
 
-type ToolExecutor = (argumentsObject: Record<string, unknown>) => Promise<string>;
+type ToolExecutor = (
+  argumentsObject: Record<string, unknown>
+) => Promise<string>;
 
 type ToolMetadata = {
   requiresApproval: boolean;
@@ -111,7 +120,11 @@ async function loadPersistedConfig(): Promise<PersistedConfig> {
 
 async function savePersistedConfig(config: PersistedConfig) {
   await fs.mkdir(CONFIG_DIRECTORY, { recursive: true });
-  await fs.writeFile(CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
+  await fs.writeFile(
+    CONFIG_PATH,
+    `${JSON.stringify(config, null, 2)}\n`,
+    "utf-8"
+  );
 }
 
 function parseToolDefinition(source: string): ToolDefinition | null {
@@ -135,7 +148,9 @@ function parseToolDefinition(source: string): ToolDefinition | null {
 }
 
 function parseToolMetadata(source: string): ToolMetadata {
-  const metadataMatch = source.match(/##\s*Metadata\s*\n+```json\s*\n([\s\S]*?)\n```/);
+  const metadataMatch = source.match(
+    /##\s*Metadata\s*\n+```json\s*\n([\s\S]*?)\n```/
+  );
   if (!metadataMatch) {
     return {
       requiresApproval: false,
@@ -157,7 +172,10 @@ async function loadTools() {
     files
       .filter((file) => file.endsWith(".md") && file !== "system-prompt.md")
       .map(async (file) => {
-        const source = await fs.readFile(path.join(TOOLS_DIRECTORY, file), "utf-8");
+        const source = await fs.readFile(
+          path.join(TOOLS_DIRECTORY, file),
+          "utf-8"
+        );
         const parsedDefinition = parseToolDefinition(source);
         const metadata = parseToolMetadata(source);
         if (!parsedDefinition) {
@@ -171,13 +189,19 @@ async function loadTools() {
           );
         }
 
-        const modulePath = path.join(WORKSPACE_ROOT, TOOLS_DIRECTORY, `${expectedName}.ts`);
+        const modulePath = path.join(
+          WORKSPACE_ROOT,
+          TOOLS_DIRECTORY,
+          `${expectedName}.ts`
+        );
         const toolModule = (await import(pathToFileURL(modulePath).href)) as {
           execute?: ToolExecutor;
         };
 
         if (typeof toolModule.execute !== "function") {
-          throw new Error(`Tool module "${expectedName}.ts" must export an execute function.`);
+          throw new Error(
+            `Tool module "${expectedName}.ts" must export an execute function.`
+          );
         }
 
         return [
@@ -233,7 +257,11 @@ function extractTextParts(content: unknown): string[] {
       text?: unknown;
     };
 
-    if (candidate.type === "text" && typeof candidate.text === "string" && candidate.text.trim()) {
+    if (
+      candidate.type === "text" &&
+      typeof candidate.text === "string" &&
+      candidate.text.trim()
+    ) {
       return [candidate.text];
     }
 
@@ -253,7 +281,10 @@ function extractAssistantText(messages: Message[]) {
     .join("");
 }
 
-function getApprovalTarget(tool: LoadedTool, argumentsObject: Record<string, unknown>) {
+function getApprovalTarget(
+  tool: LoadedTool,
+  argumentsObject: Record<string, unknown>
+) {
   if (!tool.metadata.requiresApproval) {
     return null;
   }
@@ -350,7 +381,8 @@ let insertDraft = "";
 let commandDraft = "";
 const entries: ChatEntry[] = [];
 let upmergeMode: "direct" | "worktree" = "direct";
-let upmergeNote = "A git worktree will be created on the first edit when available.";
+let upmergeNote =
+  "A git worktree will be created on the first edit when available.";
 let upmergeItems: UpmergeMenuItem[] = [];
 let upmergeMenuOpen = false;
 let upmergeSelection = 0;
@@ -358,7 +390,8 @@ let upmergePanelAttached = false;
 let activeStreamAbortController: AbortController | null = null;
 const approvedEditTargets = new Set<string>();
 let pendingApproval: PendingApproval | null = null;
-let currentModel: string = persistedConfig.currentModel ?? MODEL_PRESETS.anthropic;
+let currentModel: string =
+  persistedConfig.currentModel ?? MODEL_PRESETS.anthropic;
 
 class ComposerTextarea extends TextareaRenderable {
   handleKeyPress(key: KeyEvent): boolean {
@@ -380,9 +413,9 @@ function nextId(prefix: string) {
 }
 
 function describeModelOptions() {
-  const presetLines = (Object.entries(MODEL_PRESETS) as Array<[ModelPresetName, string]>).map(
-    ([name, modelId]) => `:model ${name.padEnd(10, " ")} ${modelId}`
-  );
+  const presetLines = (
+    Object.entries(MODEL_PRESETS) as Array<[ModelPresetName, string]>
+  ).map(([name, modelId]) => `:model ${name.padEnd(10, " ")} ${modelId}`);
 
   return [
     `Current model: \`${currentModel}\``,
@@ -619,7 +652,9 @@ async function refreshUpmergePreview() {
   }
 
   const selected = selectedUpmergeItem();
-  upmergePreviewText.content = await getUpmergePreview(selected?.path ?? undefined);
+  upmergePreviewText.content = await getUpmergePreview(
+    selected?.path ?? undefined
+  );
   renderer.requestRender();
 }
 
@@ -717,7 +752,8 @@ function setMode(nextMode: Mode) {
   if (mode === "insert") {
     composer.title = "-- INSERT --";
     composer.borderColor = "#3b82f6";
-    input.placeholder = "Type a message. Enter sends, Shift+Enter adds a new line";
+    input.placeholder =
+      "Type a message. Enter sends, Shift+Enter adds a new line";
     setComposerText(insertDraft);
     process.nextTick(() => {
       if (mode === "insert") {
@@ -729,7 +765,7 @@ function setMode(nextMode: Mode) {
   } else if (mode === "command") {
     composer.title = ":";
     composer.borderColor = "#f59e0b";
-    input.placeholder = "clear  model anthropic  quit";
+    input.placeholder = "clear  model anthropic  index  quit";
     setComposerText(commandDraft);
     process.nextTick(() => {
       if (mode === "command") {
@@ -809,7 +845,10 @@ function updateSidebar(note = "Ready for your next prompt.") {
       "",
       items.length
         ? items
-            .map((item, index) => `${index === upmergeSelection ? ">" : " "} ${item.label}`)
+            .map(
+              (item, index) =>
+                `${index === upmergeSelection ? ">" : " "} ${item.label}`
+            )
             .join("\n")
         : "No pending upmerges.",
       "",
@@ -843,12 +882,14 @@ function updateSidebar(note = "Ready for your next prompt.") {
     "",
     "Commands",
     ":clear reset conversation",
+    ":index embed skill chunks",
     ":model switch providers",
     ":quit  exit UI",
     "",
     "Gateway",
     "OPENAI_API_BASE",
     "OPENAI_API_KEY",
+    "OPENAI_EMBEDDING_MODEL",
     "",
     upmergeNote,
     "",
@@ -864,7 +905,8 @@ function updateComposerHint() {
   }
 
   if (upmergeMenuOpen) {
-    composerHint.content = "Upmerge menu open. Enter applies the selected diff, u/Esc closes it.";
+    composerHint.content =
+      "Upmerge menu open. Enter applies the selected diff, u/Esc closes it.";
     return;
   }
 
@@ -882,7 +924,7 @@ function updateComposerHint() {
 
   if (mode === "command") {
     composerHint.content =
-      "Command mode. Run :clear, :model, or :quit, or press Esc to return to normal.";
+      "Command mode. Run :clear, :index, :model, or :quit, or press Esc to return to normal.";
     return;
   }
 
@@ -892,7 +934,9 @@ function updateComposerHint() {
     return;
   }
 
-  composerHint.content = `Ready to send ${insertDraft.trim().length} characters.`;
+  composerHint.content = `Ready to send ${
+    insertDraft.trim().length
+  } characters.`;
 }
 
 function appendEntry(role: ChatRole, content: string) {
@@ -996,7 +1040,10 @@ async function executeCommand(raw: string) {
     currentModel = requestedModel;
     try {
       await savePersistedConfig({ currentModel });
-      appendEntry("system", `Switched model to \`${currentModel}\`. Future sessions will reuse it.`);
+      appendEntry(
+        "system",
+        `Switched model to \`${currentModel}\`. Future sessions will reuse it.`
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       appendEntry(
@@ -1007,6 +1054,40 @@ async function executeCommand(raw: string) {
     updateSidebar(`Using ${currentModel} for the next prompt.`);
     commandDraft = "";
     setMode("normal");
+    return;
+  }
+
+  if (command === "index") {
+    commandDraft = "";
+    busy = true;
+    setMode("normal");
+    updateSidebar("Indexing skill files with embeddings...");
+
+    try {
+      const index = await indexSkills(WORKSPACE_ROOT);
+      appendEntry(
+        "system",
+        [
+          `Indexed ${index.chunks.length} skill chunk${
+            index.chunks.length === 1 ? "" : "s"
+          }.`,
+          `Skill files: ${
+            new Set(index.chunks.map((chunk) => chunk.path)).size
+          }.`,
+          `Saved embeddings to \`.agents/skills-index.json\`.`,
+          `Embedding model: \`${index.embeddingModel}\`.`,
+        ].join("\n")
+      );
+      updateSidebar("Skill index refreshed.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      appendEntry("error", `Skill indexing failed.\n\n${message}`);
+      updateSidebar("Skill indexing failed.");
+    } finally {
+      busy = false;
+      updateComposerHint();
+      renderer.requestRender();
+    }
     return;
   }
 
@@ -1092,9 +1173,11 @@ async function submitPrompt() {
             sawToolActivity = true;
             appendEntry(
               "system",
-              [`Tool \`${chunk.toolName}\` completed.`, "", formatToolOutput(chunk.output)].join(
-                "\n"
-              )
+              [
+                `Tool \`${chunk.toolName}\` completed.`,
+                "",
+                formatToolOutput(chunk.output),
+              ].join("\n")
             );
             await refreshUpmergeState();
             updateSidebar(`Tool completed: ${chunk.toolName}`);
@@ -1129,8 +1212,16 @@ async function submitPrompt() {
       }
     }
 
-    if (!streamAborted && !assistantContent.trim() && !sawAssistantOutput && !sawToolActivity) {
-      appendEntry("assistant", "The model returned an empty response. Try another prompt.");
+    if (
+      !streamAborted &&
+      !assistantContent.trim() &&
+      !sawAssistantOutput &&
+      !sawToolActivity
+    ) {
+      appendEntry(
+        "assistant",
+        "The model returned an empty response. Try another prompt."
+      );
     }
 
     if (!streamAborted) {
@@ -1145,12 +1236,16 @@ async function submitPrompt() {
 
     const message = error instanceof Error ? error.message : String(error);
     appendEntry("error", `Request failed.\n\n${message}`);
-    updateSidebar("Request failed. Check your model selection and AI provider credentials.");
+    updateSidebar(
+      "Request failed. Check your model selection and AI provider credentials."
+    );
   } finally {
     busy = false;
     updateComposerHint();
     updateSidebar(
-      streamAborted ? "Stream aborted. Ready for your next prompt." : "Ready for your next prompt."
+      streamAborted
+        ? "Stream aborted. Ready for your next prompt."
+        : "Ready for your next prompt."
     );
     renderer.requestRender();
     scrollToBottom();

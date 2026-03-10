@@ -1,5 +1,6 @@
 import {
   dynamicTool,
+  embedMany,
   jsonSchema,
   stepCountIs,
   streamText,
@@ -71,6 +72,7 @@ function normalizeOpenAIBaseURL(value: string) {
 
 const openAIBase = process.env.OPENAI_API_BASE;
 const openAIKey = process.env.OPENAI_API_KEY;
+const DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small";
 
 if (!openAIBase) {
   throw new Error("Missing OPENAI_API_BASE environment variable.");
@@ -80,12 +82,29 @@ if (!openAIKey) {
   throw new Error("Missing OPENAI_API_KEY environment variable.");
 }
 
-const shopifyGateway = createOpenAICompatible<string, never, never, never>({
+const shopifyGateway = createOpenAICompatible<string, never, string, never>({
   name: "shopify-llm-gateway",
   baseURL: normalizeOpenAIBaseURL(openAIBase),
   apiKey: openAIKey,
   includeUsage: true,
 });
+
+export function getEmbeddingModelId() {
+  return process.env.OPENAI_EMBEDDING_MODEL?.trim() || DEFAULT_EMBEDDING_MODEL;
+}
+
+export async function embedValues(values: string[]) {
+  if (!values.length) {
+    return [] as number[][];
+  }
+
+  const { embeddings } = await embedMany({
+    model: shopifyGateway.embeddingModel(getEmbeddingModelId()),
+    values,
+  });
+
+  return embeddings;
+}
 
 export function streamResponse({
   model,
