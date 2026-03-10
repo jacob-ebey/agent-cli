@@ -20,11 +20,15 @@ import {
 } from "./lib/llm.ts";
 import {
   cleanupWorkspaceSession,
+  getUpmergeLinePreview,
   getUpmergePreview,
   getUpmergeStatus,
   relativeOriginalWorkspacePath,
+  revertLineChange,
+  revertRelativePath,
   resolveOriginalWorkspacePath,
   upmergeAll,
+  upmergeLineChange,
   upmergeRelativePath,
 } from "./worktree.ts";
 
@@ -55,9 +59,13 @@ type LoadedTool = {
   metadata: ToolMetadata;
 };
 
+type UpmergeScope = "files" | "lines";
+
 type UpmergeMenuItem = {
   label: string;
+  kind: "all" | "file" | "line";
   path: string | null;
+  changeId?: string;
 };
 
 type PendingApproval = {
@@ -297,7 +305,9 @@ let commandDraft = "";
 const entries: ChatEntry[] = [];
 let upmergeMode: "direct" | "worktree" = "direct";
 let upmergeNote = "A git worktree will be created on the first edit when available.";
-let upmergeItems: UpmergeMenuItem[] = [];
+let upmergeScope: UpmergeScope = "files";
+let upmergeFileItems: UpmergeMenuItem[] = [];
+let upmergeLineItems: UpmergeMenuItem[] = [];
 let upmergeMenuOpen = false;
 let upmergeSelection = 0;
 let upmergePanelAttached = false;
@@ -514,11 +524,18 @@ function moveComposerCursorToEnd(value: string) {
 }
 
 function currentUpmergeItems() {
-  if (!upmergeItems.length) {
+  if (upmergeScope === "lines") {
+    return upmergeLineItems;
+  }
+
+  if (!upmergeFileItems.length) {
     return [];
   }
 
-  return [{ label: "Upmerge all pending files", path: null }, ...upmergeItems];
+  return [
+    { label: "Upmerge all pending files", kind: "all", path: null },
+    ...upmergeFileItems,
+  ];
 }
 
 function selectedUpmergeItem() {
@@ -536,7 +553,14 @@ async function refreshUpmergePreview() {
   }
 
   const selected = selectedUpmergeItem();
-  upmergePreviewText.content = await getUpmergePreview(selected?.path ?? undefined);
+  if (!selected) {
+    upmergePreviewText.content =
+      upmergeScope === "lines" ? "No pending line changes." : "No pending upmerges.";
+  } else if (selected.kind === "line" && selected.path && selected.changeId) {
+    upmergePreviewText.content = await getUpmergeLinePreview(selected.path, selected.changeId);
+  } else {
+    upmergePreviewText.content = await getUpmergePreview(selected.path ?? undefined);
+  }
   renderer.requestRender();
 }
 
@@ -544,10 +568,21 @@ async function refreshUpmergeState() {
   const status = await getUpmergeStatus();
   upmergeMode = status.mode;
   upmergeNote = status.note;
-  upmergeItems = status.pendingFiles.map((entry) => ({
+  upmergeFileItems = status.pendingFiles.map((entry) => ({
     label: entry,
+    kind: "file",
     path: entry,
   }));
+  upmergeLineItems = status.pendingLineChanges.map((entry) => ({
+    label: `${entry.relativePath}: ${entry.summary}`,
+    kind: "line",
+    path: entry.relativePath,
+    changeId: entry.id,
+  }));
+
+  if (upmergeScope === "lines" && !upmergeLineItems.length) {
+    upmergeScope = "files";
+  }
 
   const items = currentUpmergeItems();
   if (!items.length) {
@@ -602,19 +637,60 @@ async function moveUpmergeSelection(delta: number) {
   updateSidebar();
 }
 
+async function setUpmergeScope(scope: UpmergeScope) {
+  if (scope === upmergeScope) {
+    return;
+  }
+
+  upmergeScope = scope;
+  upmergeSelection = 0;
+  await refreshUpmergePreview();
+  updateSidebar();
+}
+
 async function runUpmergeSelection() {
   const selected = selectedUpmergeItem();
   if (!selected) {
-    updateSidebar("No pending upmerges.");
+    updateSidebar(
+      upmergeScope === "lines" ? "No pending line changes." : "No pending upmerges."
+    );
     renderer.requestRender();
     return;
   }
 
   try {
     const message =
-      selected.path === null
+      selected.kind === "all"
         ? await upmergeAll()
-        : await upmergeRelativePath(selected.path);
+        : selected.kind === "line" && selected.path && selected.changeId
+          ? await upmergeLineChange(selected.path, selected.changeId)
+          : selected.path
+            ? await upmergeRelativePath(selected.path)
+            : "No pending upmerges.";
+    appendEntry("system", message);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    appendEntry("error", message);
+  }
+
+  await refreshUpmergeState();
+}
+
+async function revertUpmergeSelection() {
+  const selected = selectedUpmergeItem();
+  if (!selected || selected.kind === "all") {
+    updateSidebar("Select a file or line to revert.");
+    renderer.requestRender();
+    return;
+  }
+
+  try {
+    const message =
+      selected.kind === "line" && selected.path && selected.changeId
+        ? await revertLineChange(selected.path, selected.changeId)
+        : selected.path
+          ? await revertRelativePath(selected.path)
+          : "Select a file or line to revert.";
     appendEntry("system", message);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -658,7 +734,7 @@ function setMode(nextMode: Mode) {
   } else {
     composer.title = "-- NORMAL --";
     composer.borderColor = "#334155";
-    input.placeholder = "Press i to insert, : for commands, or u for upmerge";
+    input.placeholder = "Press i to insert, : for commands, or u for pending edits";
     setComposerText("");
     input.blur();
   }
@@ -722,16 +798,22 @@ function updateSidebar(note = "Ready for your next prompt.") {
     sidebar.borderColor = "#22c55e";
     sidebarText.content = [
       `Edits: ${upmergeMode}`,
-      `Pending: ${upmergeItems.length}`,
+      `Scope: ${upmergeScope}`,
+      `Files: ${upmergeFileItems.length}`,
+      `Lines: ${upmergeLineItems.length}`,
       "",
       items.length
         ? items
             .map((item, index) => `${index === upmergeSelection ? ">" : " "} ${item.label}`)
             .join("\n")
-        : "No pending upmerges.",
+        : upmergeScope === "lines"
+          ? "No pending line changes."
+          : "No pending upmerges.",
       "",
       "Shortcuts",
       "Enter  upmerge selected item",
+      "r      revert selected item",
+      "f / l  switch file or line scope",
       "j / k  change selection",
       "u/Esc  close menu",
       "",
@@ -747,13 +829,14 @@ function updateSidebar(note = "Ready for your next prompt.") {
     `Mode: ${mode}`,
     `Messages: ${entries.length}`,
     `Edits: ${upmergeMode}`,
-    `Upmerges: ${upmergeItems.length}`,
+    `Pending files: ${upmergeFileItems.length}`,
+    `Pending lines: ${upmergeLineItems.length}`,
     "",
     "Shortcuts",
     "i      insert mode",
     ":      command mode",
     "j / k  scroll transcript",
-    "u      upmerge menu",
+    "u      pending edits menu",
     "Esc    normal mode",
     "Ctrl+C abort stream",
     "",
@@ -778,7 +861,8 @@ function updateComposerHint() {
   }
 
   if (upmergeMenuOpen) {
-    composerHint.content = "Upmerge menu open. Enter applies the selected diff, u/Esc closes it.";
+    composerHint.content =
+      "Pending edits menu open. Enter upmerges, r reverts, f/l switches scope, and u/Esc closes.";
     return;
   }
 
@@ -790,7 +874,7 @@ function updateComposerHint() {
 
   if (mode === "normal") {
     composerHint.content =
-      "Normal mode. Press i to compose, : for commands, u for upmerge, or j/k to scroll.";
+      "Normal mode. Press i to compose, : for commands, u for pending edits, or j/k to scroll.";
     return;
   }
 
@@ -1072,10 +1156,16 @@ function handleGlobalKey(key: KeyEvent) {
   if (upmergeMenuOpen) {
     if (key.name === "escape" || key.name === "u") {
       closeUpmergeMenu();
+    } else if (key.name === "f") {
+      void setUpmergeScope("files");
+    } else if (key.name === "l") {
+      void setUpmergeScope("lines");
     } else if (key.name === "j" || key.name === "down") {
       void moveUpmergeSelection(1);
     } else if (key.name === "k" || key.name === "up") {
       void moveUpmergeSelection(-1);
+    } else if (key.name === "r") {
+      void revertUpmergeSelection();
     } else if (key.name === "enter" || key.name === "return") {
       void runUpmergeSelection();
     }
