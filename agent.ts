@@ -23,6 +23,7 @@ import {
   cleanupWorkspaceSession,
   getUpmergePreview,
   getUpmergeStatus,
+  prepareWorkspaceForEdit,
   relativeOriginalWorkspacePath,
   revertRelativePath,
   resolveOriginalWorkspacePath,
@@ -502,12 +503,21 @@ function extractAssistantText(messages: Message[]) {
     .join("");
 }
 
-function getApprovalTarget(
+async function getApprovalTarget(
+  toolName: string,
   tool: LoadedTool,
   argumentsObject: Record<string, unknown>
 ) {
   if (!tool.metadata.requiresApproval) {
     return null;
+  }
+
+  // File edits are already isolated once the session has moved into a worktree.
+  if (toolName === "apply-patch") {
+    const session = await prepareWorkspaceForEdit();
+    if (session.mode === "worktree") {
+      return null;
+    }
   }
 
   if (tool.metadata.approvalScope === "command") {
@@ -543,7 +553,7 @@ async function ensureToolApproval(
   tool: LoadedTool,
   argumentsObject: Record<string, unknown>
 ) {
-  const target = getApprovalTarget(tool, argumentsObject);
+  const target = await getApprovalTarget(toolName, tool, argumentsObject);
   if (!target) {
     return;
   }
@@ -563,37 +573,14 @@ async function ensureToolApproval(
   }
 
   const decision = await new Promise<ApprovalDecision>((resolve) => {
-    pendingApproval = {
+    enqueueApproval({
       toolName,
       approvalKey: target.approvalKey,
       displayLabel: target.displayLabel,
       displayValue: target.displayValue,
       approvalPersistence: target.approvalPersistence,
       resolve,
-    };
-
-    const approvalPrompt =
-      target.approvalPersistence === "persisted"
-        ? `Press \`y\` to approve this command once, \`a\` to always approve this exact command, or \`n\` to deny.`
-        : `Press \`y\` to approve edits to this file for the rest of the session, or \`n\` to deny.`;
-
-    appendEntry(
-      "system",
-      [
-        `Approval required before \`${toolName}\` can access ${target.displayLabel.toLowerCase()} \`${
-          target.displayValue
-        }\`.`,
-        "",
-        approvalPrompt,
-      ].join("\n")
-    );
-    updateSidebar(
-      `Waiting for approval for ${target.displayLabel.toLowerCase()} ${
-        target.displayValue
-      }.`
-    );
-    updateComposerHint();
-    renderer.requestRender();
+    });
   });
 
   if (decision === "deny") {
@@ -656,10 +643,96 @@ let upmergeSelection = 0;
 let upmergePanelAttached = false;
 let activeStreamAbortController: AbortController | null = null;
 const approvedEditTargets = new Set<string>();
-let pendingApproval: PendingApproval | null = null;
+let activeApproval: PendingApproval | null = null;
+const queuedApprovals: PendingApproval[] = [];
 let autoScrollState: AutoScrollState = "follow";
 let currentModel: string =
   persistedConfig.currentModel ?? MODEL_PRESETS.anthropic;
+
+function currentApprovalPrompt(request: PendingApproval) {
+  return request.approvalPersistence === "persisted"
+    ? "Press `y` to approve this command once, `a` to always approve this exact command, or `n` to deny."
+    : "Press `y` to approve edits to this file for the rest of the session, or `n` to deny.";
+}
+
+function isApprovalAlreadyGranted(request: PendingApproval) {
+  return request.approvalPersistence === "persisted"
+    ? approvedShellCommands.has(request.approvalKey)
+    : approvedEditTargets.has(request.approvalKey);
+}
+
+function announceActiveApproval() {
+  if (!activeApproval) {
+    return;
+  }
+
+  appendEntry(
+    "system",
+    [
+      `Approval required before \`${activeApproval.toolName}\` can access ${activeApproval.displayLabel.toLowerCase()} \`${activeApproval.displayValue}\`.`,
+      "",
+      currentApprovalPrompt(activeApproval),
+      queuedApprovals.length
+        ? `${queuedApprovals.length} more approval request(s) are queued behind this one.`
+        : null,
+    ]
+      .filter(Boolean)
+      .join("\n")
+  );
+  updateSidebar(
+    `Waiting for approval for ${activeApproval.displayLabel.toLowerCase()} ${activeApproval.displayValue}.`
+  );
+  updateComposerHint();
+  renderer.requestRender();
+}
+
+function activateNextApproval() {
+  if (activeApproval) {
+    return;
+  }
+
+  while (queuedApprovals.length) {
+    const next = queuedApprovals.shift()!;
+    if (isApprovalAlreadyGranted(next)) {
+      next.resolve(next.approvalPersistence === "persisted" ? "always" : "session");
+      continue;
+    }
+
+    activeApproval = next;
+    announceActiveApproval();
+    return;
+  }
+
+  updateSidebar();
+  updateComposerHint();
+  renderer.requestRender();
+}
+
+function enqueueApproval(request: PendingApproval) {
+  if (!activeApproval) {
+    activeApproval = request;
+    announceActiveApproval();
+    return;
+  }
+
+  queuedApprovals.push(request);
+  updateSidebar(
+    `Queued approval for ${request.displayLabel.toLowerCase()} ${request.displayValue}.`
+  );
+  updateComposerHint();
+  renderer.requestRender();
+}
+
+function clearApprovalQueue() {
+  if (activeApproval) {
+    activeApproval.resolve("deny");
+    activeApproval = null;
+  }
+
+  while (queuedApprovals.length) {
+    queuedApprovals.shift()?.resolve("deny");
+  }
+}
 
 function updateTranscriptTitle() {
   transcriptPanel.title = busy ? "Conversation [...]" : "Conversation";
@@ -1111,12 +1184,12 @@ function resumeAutoScroll() {
 }
 
 async function settlePendingApproval(decision: ApprovalDecision) {
-  const request = pendingApproval;
+  const request = activeApproval;
   if (!request) {
     return;
   }
 
-  pendingApproval = null;
+  activeApproval = null;
 
   if (decision === "session") {
     approvedEditTargets.add(request.approvalKey);
@@ -1150,6 +1223,7 @@ async function settlePendingApproval(decision: ApprovalDecision) {
         `Failed to save shell approval for \`${request.displayValue}\`: ${message}`
       );
       updateSidebar(`Failed to save approval for ${request.displayValue}.`);
+      activateNextApproval();
       updateComposerHint();
       renderer.requestRender();
       request.resolve("deny");
@@ -1166,15 +1240,16 @@ async function settlePendingApproval(decision: ApprovalDecision) {
       `Denied ${request.displayLabel.toLowerCase()} ${request.displayValue}.`
     );
   }
+  activateNextApproval();
   updateComposerHint();
   renderer.requestRender();
   request.resolve(decision);
 }
 
 function updateSidebar(note = "Ready for your next prompt.") {
-  if (pendingApproval) {
+  if (activeApproval) {
     const approvalShortcuts =
-      pendingApproval.approvalPersistence === "persisted"
+      activeApproval.approvalPersistence === "persisted"
         ? [
             "y      approve once",
             "a      always approve this command",
@@ -1186,8 +1261,9 @@ function updateSidebar(note = "Ready for your next prompt.") {
     sidebar.borderColor = "#f59e0b";
     sidebarText.content = [
       "Status: waiting",
-      `Tool: ${pendingApproval.toolName}`,
-      `${pendingApproval.displayLabel}: ${pendingApproval.displayValue}`,
+      `Tool: ${activeApproval.toolName}`,
+      `${activeApproval.displayLabel}: ${activeApproval.displayValue}`,
+      `Queued: ${queuedApprovals.length}`,
       "",
       "Shortcuts",
       ...approvalShortcuts,
@@ -1256,11 +1332,19 @@ function updateSidebar(note = "Ready for your next prompt.") {
 }
 
 function updateComposerHint() {
-  if (pendingApproval) {
+  if (activeApproval) {
     composerHint.content =
-      pendingApproval.approvalPersistence === "persisted"
-        ? "Approval required. Press y to allow this command once, a to always allow this exact command, or n to deny."
-        : "Approval required. Press y to allow this file for the session, or n to deny.";
+      activeApproval.approvalPersistence === "persisted"
+        ? `Approval required. Press y to allow this command once, a to always allow this exact command, or n to deny.${
+            queuedApprovals.length
+              ? ` ${queuedApprovals.length} more approval request(s) are queued.`
+              : ""
+          }`
+        : `Approval required. Press y to allow this file for the session, or n to deny.${
+            queuedApprovals.length
+              ? ` ${queuedApprovals.length} more approval request(s) are queued.`
+              : ""
+          }`;
     return;
   }
 
@@ -1346,7 +1430,7 @@ function clearEntries() {
 async function resetConversation() {
   activeStreamAbortController?.abort();
   activeStreamAbortController = null;
-  pendingApproval = null;
+  clearApprovalQueue();
   approvedEditTargets.clear();
   clearEntries();
   conversation.splice(0, conversation.length, {
@@ -1642,13 +1726,13 @@ function handleGlobalKey(key: KeyEvent) {
     return;
   }
 
-  if (pendingApproval) {
+  if (activeApproval) {
     if (key.name === "y") {
       void settlePendingApproval(
-        pendingApproval.approvalPersistence === "persisted" ? "once" : "session"
+        activeApproval.approvalPersistence === "persisted" ? "once" : "session"
       );
     } else if (
-      pendingApproval.approvalPersistence === "persisted" &&
+      activeApproval.approvalPersistence === "persisted" &&
       key.name === "a"
     ) {
       void settlePendingApproval("always");

@@ -52,6 +52,7 @@ Behavior:
 
 - Paths may be relative or absolute, but they must resolve inside the workspace.
 - In git repositories, edits are applied inside a session worktree that mirrors the current workspace state. The tool returns a diff and the UI can upmerge selected files back into the main workspace.
+- When edits are isolated in that session worktree, they do not require a separate approval prompt. If worktrees are unavailable and edits apply directly, approval is still required.
 - For existing files, `old_string` must match the current file contents exactly.
 - By default, `old_string` must match exactly once. If it matches multiple times, the tool errors and asks for a more specific snippet.
 - Set `replace_all` to `true` only when every exact match should be replaced.
