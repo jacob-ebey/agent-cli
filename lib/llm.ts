@@ -54,12 +54,15 @@ export type ResponseChunk = {
 export async function streamResponse({
   messages,
   tools,
+  abortSignal,
 }: {
   messages: Message[];
   tools?: Tool[];
+  abortSignal?: AbortSignal;
 }) {
   const response = await fetch("http://localhost:8080/v1/chat/completions", {
     method: "POST",
+    signal: abortSignal,
     body: JSON.stringify({
       stream: true,
       messages,

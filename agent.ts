@@ -215,6 +215,7 @@ let upmergeItems: UpmergeMenuItem[] = [];
 let upmergeMenuOpen = false;
 let upmergeSelection = 0;
 let upmergePanelAttached = false;
+let activeStreamAbortController: AbortController | null = null;
 
 class ComposerTextarea extends TextareaRenderable {
   handleKeyPress(key: KeyEvent): boolean {
@@ -626,7 +627,7 @@ function updateSidebar(note = "Ready for your next prompt.") {
     "j / k  scroll transcript",
     "u      upmerge menu",
     "Esc    normal mode",
-    "Ctrl+C quit",
+    "Ctrl+C abort stream",
     "",
     "Commands",
     ":clear reset conversation",
@@ -648,7 +649,8 @@ function updateComposerHint() {
   }
 
   if (busy) {
-    composerHint.content = "The agent is responding. Use j and k to inspect earlier messages.";
+    composerHint.content =
+      "The agent is responding. Press Ctrl+C to abort, or use j and k to inspect earlier messages.";
     return;
   }
 
@@ -783,50 +785,78 @@ async function submitPrompt() {
   input.setText("");
   setMode("normal");
   updateSidebar("Connecting to the local agent backend...");
+  let streamAborted = false;
 
   try {
     let run = true;
     let sawAssistantOutput = false;
 
     while (run) {
-      const stream = await streamResponse({
-        messages: conversation,
-        tools,
-      });
+      const streamAbortController = new AbortController();
+      activeStreamAbortController = streamAbortController;
 
       let assistantEntry: ChatEntry | null = null;
       let assistantContent = "";
       const toolCalls: ToolCall[] = [];
 
-      await stream.pipeTo(
-        new WritableStream<ResponseChunk>({
-          write(chunk) {
-            if (chunk.reasoning) {
-              updateSidebar("Model is reasoning...");
-            }
+      try {
+        const stream = await streamResponse({
+          messages: conversation,
+          tools,
+          abortSignal: streamAbortController.signal,
+        });
 
-            if (chunk.content) {
-              if (!assistantEntry) {
-                assistantEntry = appendEntry("assistant", "");
+        await stream.pipeTo(
+          new WritableStream<ResponseChunk>({
+            write(chunk) {
+              if (chunk.reasoning) {
+                updateSidebar("Model is reasoning...");
               }
-              assistantContent += chunk.content;
-              assistantEntry.body.content = assistantContent || " ";
-              sawAssistantOutput = true;
-              renderer.requestRender();
-              scrollToBottom();
-            }
 
-            if (chunk.toolCall) {
-              collectToolCall(toolCalls, chunk.toolCall);
-              const toolName =
-                "id" in chunk.toolCall
-                  ? chunk.toolCall.function.name
-                  : toolCalls[chunk.toolCall.index]?.function.name || "tool-call";
-              updateSidebar(`Tool requested: ${toolName}`);
-            }
-          },
-        })
-      );
+              if (chunk.content) {
+                if (!assistantEntry) {
+                  assistantEntry = appendEntry("assistant", "");
+                }
+                assistantContent += chunk.content;
+                assistantEntry.body.content = assistantContent || " ";
+                sawAssistantOutput = true;
+                renderer.requestRender();
+                scrollToBottom();
+              }
+
+              if (chunk.toolCall) {
+                collectToolCall(toolCalls, chunk.toolCall);
+                const toolName =
+                  "id" in chunk.toolCall
+                    ? chunk.toolCall.function.name
+                    : toolCalls[chunk.toolCall.index]?.function.name || "tool-call";
+                updateSidebar(`Tool requested: ${toolName}`);
+              }
+            },
+          }),
+          {
+            signal: streamAbortController.signal,
+          }
+        );
+      } catch (error) {
+        if (
+          streamAbortController.signal.aborted ||
+          (error instanceof DOMException && error.name === "AbortError")
+        ) {
+          streamAborted = true;
+          updateSidebar("Streaming aborted.");
+          break;
+        }
+        throw error;
+      } finally {
+        if (activeStreamAbortController === streamAbortController) {
+          activeStreamAbortController = null;
+        }
+      }
+
+      if (streamAborted) {
+        break;
+      }
 
       if (assistantContent.trim()) {
         conversation.push({
@@ -859,13 +889,21 @@ async function submitPrompt() {
       }
     }
   } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      streamAborted = true;
+      updateSidebar("Streaming aborted.");
+      return;
+    }
+
     const message = error instanceof Error ? error.message : String(error);
     appendEntry("error", `Request failed.\n\n${message}`);
     updateSidebar("Request failed. Check that the local backend is running.");
   } finally {
     busy = false;
     updateComposerHint();
-    updateSidebar("Ready for your next prompt.");
+    updateSidebar(
+      streamAborted ? "Stream aborted. Ready for your next prompt." : "Ready for your next prompt."
+    );
     renderer.requestRender();
     scrollToBottom();
   }
@@ -877,7 +915,14 @@ function isColonKey(key: KeyEvent) {
 
 function handleGlobalKey(key: KeyEvent) {
   if (key.ctrl && key.name === "c") {
-    void shutdown();
+    if (activeStreamAbortController) {
+      updateSidebar("Aborting current stream...");
+      activeStreamAbortController.abort();
+      renderer.requestRender();
+    } else {
+      updateSidebar("No active stream to abort. Use :quit to exit.");
+      renderer.requestRender();
+    }
     return;
   }
 
