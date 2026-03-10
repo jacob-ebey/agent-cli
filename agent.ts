@@ -238,6 +238,100 @@ function formatToolOutput(value: unknown) {
   }
 }
 
+function readStringArgument(
+  argumentsObject: Record<string, unknown>,
+  key: string
+) {
+  const value = argumentsObject[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function readIntegerArgument(
+  argumentsObject: Record<string, unknown>,
+  key: string
+) {
+  const value = argumentsObject[key];
+  return typeof value === "number" && Number.isInteger(value) ? value : null;
+}
+
+function matchOutputLabel(output: unknown, label: string) {
+  if (typeof output !== "string") {
+    return null;
+  }
+
+  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = output.match(new RegExp(`^${escapedLabel}:\\s+(.+)$`, "m"));
+  return match?.[1]?.trim() ?? null;
+}
+
+function summarizeToolResult(
+  toolName: string,
+  input: unknown,
+  output: unknown
+) {
+  const argumentsObject = isRecord(input) ? input : {};
+
+  switch (toolName) {
+    case "read_file": {
+      const requestedPath = readStringArgument(argumentsObject, "path");
+      const offset = readIntegerArgument(argumentsObject, "offset");
+      const limit = readIntegerArgument(argumentsObject, "limit");
+      const range = offset
+        ? limit
+          ? `Requested lines: ${offset}-${offset + limit - 1}.`
+          : `Requested from line ${offset}.`
+        : null;
+
+      return [
+        requestedPath
+          ? `Read file \`${requestedPath}\`.`
+          : "Read a workspace file.",
+        range,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
+    case "search_files": {
+      const pattern = readStringArgument(argumentsObject, "pattern");
+      const requestedPath = readStringArgument(argumentsObject, "path") ?? ".";
+      const glob = readStringArgument(argumentsObject, "glob");
+      const matches = matchOutputLabel(output, "Matches");
+      const truncated = matchOutputLabel(output, "Truncated");
+
+      return [
+        pattern
+          ? `Searched files in \`${requestedPath}\` for \`${pattern}\`.`
+          : `Searched files in \`${requestedPath}\`.`,
+        glob ? `Glob: \`${glob}\`.` : null,
+        matches ? `${matches} result(s).` : null,
+        truncated ? truncated : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
+    case "search_skills": {
+      const query = readStringArgument(argumentsObject, "query");
+      const indexedChunks = matchOutputLabel(output, "Indexed chunks");
+      const resultsCount =
+        typeof output === "string"
+          ? Array.from(output.matchAll(/^\d+\.\s/mg)).length
+          : null;
+
+      return [
+        query
+          ? `Searched indexed skills for \`${query}\`.`
+          : "Searched indexed skills.",
+        resultsCount !== null ? `${resultsCount} result(s).` : null,
+        indexedChunks ? `Indexed chunks available: ${indexedChunks}.` : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
+    default:
+      return null;
+  }
+}
+
 function extractTextParts(content: unknown): string[] {
   if (typeof content === "string") {
     return content.trim() ? [content] : [];
@@ -1173,11 +1267,12 @@ async function submitPrompt() {
             sawToolActivity = true;
             appendEntry(
               "system",
-              [
-                `Tool \`${chunk.toolName}\` completed.`,
-                "",
-                formatToolOutput(chunk.output),
-              ].join("\n")
+              summarizeToolResult(chunk.toolName, chunk.input, chunk.output) ??
+                [
+                  `Tool \`${chunk.toolName}\` completed.`,
+                  "",
+                  formatToolOutput(chunk.output),
+                ].join("\n")
             );
             await refreshUpmergeState();
             updateSidebar(`Tool completed: ${chunk.toolName}`);

@@ -6,4 +6,5 @@ The user may stear you throughout your execution of the task.
 
 Before starting any non-trivial task, first use `search_skills` with a short query based on the user's request.
 Use the returned blurbs and line ranges to decide whether a skill is relevant, then use `read_file` to load the full `SKILL.md` only when needed.
+When a `SKILL.md` references additional local files, linked paths, or symlinked targets for deeper context, you may follow and read those as needed to gather relevant information.
 You may skip the skill search only for trivial requests or when no repository skill could plausibly help.
