@@ -10,7 +10,9 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
+    "@ai-sdk/openai-compatible": "^2.0.35",
     "@opentui/core": "^0.1.87",
+    "ai": "^6.0.116",
     "ollama": "^0.5.16"
   }
 }

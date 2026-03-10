@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import { homedir } from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -16,26 +17,30 @@ import {
   type Message,
   type ResponseChunk,
   type Tool,
-  type ToolCall,
 } from "./lib/llm.ts";
 import {
   cleanupWorkspaceSession,
-  getUpmergeLinePreview,
   getUpmergePreview,
   getUpmergeStatus,
   relativeOriginalWorkspacePath,
-  revertLineChange,
-  revertRelativePath,
   resolveOriginalWorkspacePath,
   upmergeAll,
-  upmergeLineChange,
   upmergeRelativePath,
 } from "./worktree.ts";
 
 const WORKSPACE_ROOT = process.cwd();
 const TOOLS_DIRECTORY = "tools";
-const BACKEND_URL = "http://localhost:8080/v1/chat/completions";
 const SYSTEM_PROMPT_PATH = path.join(TOOLS_DIRECTORY, "system-prompt.md");
+const MODEL_PRESETS = {
+  anthropic: "anthropic:claude-sonnet-4-6",
+  openai: "openai:gpt-5.4",
+  google: "google:gemini-3.1-pro-preview",
+} as const;
+const CONFIG_DIRECTORY =
+  process.platform === "win32"
+    ? path.join(process.env.APPDATA ?? path.join(homedir(), "AppData", "Roaming"), "agent-cli")
+    : path.join(process.env.XDG_CONFIG_HOME ?? path.join(homedir(), ".config"), "agent-cli");
+const CONFIG_PATH = path.join(CONFIG_DIRECTORY, "config.json");
 
 type ChatRole = "assistant" | "user" | "system" | "error";
 type Mode = "normal" | "insert" | "command";
@@ -53,19 +58,17 @@ type ToolMetadata = {
   requiresApproval: boolean;
 };
 
+type ToolDefinition = Pick<Tool, "name" | "description" | "inputSchema">;
+
 type LoadedTool = {
-  definition: Tool;
+  definition: ToolDefinition;
   execute: ToolExecutor;
   metadata: ToolMetadata;
 };
 
-type UpmergeScope = "files" | "lines";
-
 type UpmergeMenuItem = {
   label: string;
-  kind: "all" | "file" | "line";
   path: string | null;
-  changeId?: string;
 };
 
 type PendingApproval = {
@@ -75,11 +78,43 @@ type PendingApproval = {
   resolve: (approved: boolean) => void;
 };
 
+type ModelPresetName = keyof typeof MODEL_PRESETS;
+type PersistedConfig = {
+  currentModel?: string;
+};
+
 function normalizeWhitespace(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function parseToolDefinition(source: string): Tool | null {
+function parsePersistedModel(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+async function loadPersistedConfig(): Promise<PersistedConfig> {
+  try {
+    const source = await fs.readFile(CONFIG_PATH, "utf-8");
+    const parsed = JSON.parse(source) as {
+      currentModel?: unknown;
+    };
+    const currentModel = parsePersistedModel(parsed.currentModel);
+    return currentModel ? { currentModel } : {};
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return {};
+    }
+
+    console.warn(`Failed to load agent config from ${CONFIG_PATH}:`, error);
+    return {};
+  }
+}
+
+async function savePersistedConfig(config: PersistedConfig) {
+  await fs.mkdir(CONFIG_DIRECTORY, { recursive: true });
+  await fs.writeFile(CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
+}
+
+function parseToolDefinition(source: string): ToolDefinition | null {
   const nameMatch = source.match(/^#\s*`?([a-zA-Z0-9_-]+)`?\s*$/m);
   const descriptionMatch = source.match(
     /##\s*Description\s*\n+([\s\S]*?)(?=\n##\s|\s*$)/
@@ -93,12 +128,9 @@ function parseToolDefinition(source: string): Tool | null {
   }
 
   return {
-    type: "function",
-    function: {
-      name: nameMatch[1],
-      description: normalizeWhitespace(descriptionMatch[1]),
-      parameters: JSON.parse(parametersMatch[1]),
-    },
+    name: nameMatch[1],
+    description: normalizeWhitespace(descriptionMatch[1]),
+    inputSchema: JSON.parse(parametersMatch[1]),
   };
 }
 
@@ -133,9 +165,9 @@ async function loadTools() {
         }
 
         const expectedName = path.basename(file, ".md");
-        if (parsedDefinition.function.name !== expectedName) {
+        if (parsedDefinition.name !== expectedName) {
           throw new Error(
-            `Tool definition name "${parsedDefinition.function.name}" must match "${expectedName}.md".`
+            `Tool definition name "${parsedDefinition.name}" must match "${expectedName}.md".`
           );
         }
 
@@ -149,7 +181,7 @@ async function loadTools() {
         }
 
         return [
-          parsedDefinition.function.name,
+          parsedDefinition.name,
           {
             definition: parsedDefinition,
             execute: toolModule.execute,
@@ -166,61 +198,59 @@ async function loadTools() {
   );
 }
 
-async function executeToolCall(toolCall: ToolCall, loadedTools: Map<string, LoadedTool>) {
-  let content: string;
-
-  try {
-    const parsedArguments = JSON.parse(toolCall.function.arguments || "{}") as Record<
-      string,
-      unknown
-    >;
-
-    const tool = loadedTools.get(toolCall.function.name);
-    if (!tool) {
-      throw new Error(`Unknown tool: ${toolCall.function.name}`);
-    }
-
-    await ensureToolApproval(toolCall, tool, parsedArguments);
-    content = await tool.execute(parsedArguments);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    content = `Tool execution failed: ${message}`;
-  }
-
-  return {
-    role: "tool" as const,
-    tool_call_id: toolCall.id,
-    name: toolCall.function.name,
-    arguments: toolCall.function.arguments,
-    content,
-  };
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function collectToolCall(toolCalls: ToolCall[], chunk: NonNullable<ResponseChunk["toolCall"]>) {
-  const existing = toolCalls[chunk.index];
-
-  if ("id" in chunk) {
-    toolCalls[chunk.index] = {
-      index: chunk.index,
-      id: chunk.id,
-      type: "function",
-      function: {
-        name: chunk.function.name,
-        arguments: `${existing?.function.arguments ?? ""}${chunk.function.arguments ?? ""}`,
-      },
-    };
-    return;
+function formatToolOutput(value: unknown) {
+  if (typeof value === "string") {
+    return value;
   }
 
-  toolCalls[chunk.index] = {
-    index: chunk.index,
-    id: existing?.id ?? `pending-tool-${chunk.index}`,
-    type: "function",
-    function: {
-      name: existing?.function.name ?? "unknown",
-      arguments: `${existing?.function.arguments ?? ""}${chunk.function.arguments}`,
-    },
-  };
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function extractTextParts(content: unknown): string[] {
+  if (typeof content === "string") {
+    return content.trim() ? [content] : [];
+  }
+
+  if (!Array.isArray(content)) {
+    return [];
+  }
+
+  return content.flatMap((part) => {
+    if (typeof part !== "object" || part === null) {
+      return [];
+    }
+
+    const candidate = part as {
+      type?: unknown;
+      text?: unknown;
+    };
+
+    if (candidate.type === "text" && typeof candidate.text === "string" && candidate.text.trim()) {
+      return [candidate.text];
+    }
+
+    return [];
+  });
+}
+
+function extractAssistantText(messages: Message[]) {
+  return messages
+    .flatMap((message) => {
+      if (message.role !== "assistant") {
+        return [];
+      }
+
+      return extractTextParts((message as { content?: unknown }).content);
+    })
+    .join("");
 }
 
 function getApprovalTarget(tool: LoadedTool, argumentsObject: Record<string, unknown>) {
@@ -241,7 +271,7 @@ function getApprovalTarget(tool: LoadedTool, argumentsObject: Record<string, unk
 }
 
 async function ensureToolApproval(
-  toolCall: ToolCall,
+  toolName: string,
   tool: LoadedTool,
   argumentsObject: Record<string, unknown>
 ) {
@@ -252,7 +282,7 @@ async function ensureToolApproval(
 
   const approved = await new Promise<boolean>((resolve) => {
     pendingApproval = {
-      toolName: toolCall.function.name,
+      toolName,
       approvalKey: target.approvalKey,
       displayPath: target.displayPath,
       resolve,
@@ -260,7 +290,7 @@ async function ensureToolApproval(
     appendEntry(
       "system",
       [
-        `Approval required before \`${toolCall.function.name}\` can edit \`${target.displayPath}\`.`,
+        `Approval required before \`${toolName}\` can edit \`${target.displayPath}\`.`,
         "",
         "Press `y` to approve edits to this file for the rest of the session, or `n` to deny.",
       ].join("\n")
@@ -279,7 +309,23 @@ const [systemPrompt, loadedTools] = await Promise.all([
   fs.readFile(SYSTEM_PROMPT_PATH, "utf-8"),
   loadTools(),
 ]);
-const tools = Array.from(loadedTools.values(), (tool) => tool.definition);
+const persistedConfig = await loadPersistedConfig();
+const tools = Array.from(loadedTools.values(), (tool) => ({
+  name: tool.definition.name,
+  description: tool.definition.description,
+  inputSchema: tool.definition.inputSchema,
+  execute: async (input: unknown) => {
+    const parsedArguments = isRecord(input) ? input : {};
+
+    try {
+      await ensureToolApproval(tool.definition.name, tool, parsedArguments);
+      return await tool.execute(parsedArguments);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `Tool execution failed: ${message}`;
+    }
+  },
+}));
 
 const renderer = await createCliRenderer({
   exitOnCtrlC: false,
@@ -305,15 +351,14 @@ let commandDraft = "";
 const entries: ChatEntry[] = [];
 let upmergeMode: "direct" | "worktree" = "direct";
 let upmergeNote = "A git worktree will be created on the first edit when available.";
-let upmergeScope: UpmergeScope = "files";
-let upmergeFileItems: UpmergeMenuItem[] = [];
-let upmergeLineItems: UpmergeMenuItem[] = [];
+let upmergeItems: UpmergeMenuItem[] = [];
 let upmergeMenuOpen = false;
 let upmergeSelection = 0;
 let upmergePanelAttached = false;
 let activeStreamAbortController: AbortController | null = null;
 const approvedEditTargets = new Set<string>();
 let pendingApproval: PendingApproval | null = null;
+let currentModel: string = persistedConfig.currentModel ?? MODEL_PRESETS.anthropic;
 
 class ComposerTextarea extends TextareaRenderable {
   handleKeyPress(key: KeyEvent): boolean {
@@ -332,6 +377,34 @@ class ComposerTextarea extends TextareaRenderable {
 function nextId(prefix: string) {
   nextIdCounter += 1;
   return `${prefix}-${nextIdCounter}`;
+}
+
+function describeModelOptions() {
+  const presetLines = (Object.entries(MODEL_PRESETS) as Array<[ModelPresetName, string]>).map(
+    ([name, modelId]) => `:model ${name.padEnd(10, " ")} ${modelId}`
+  );
+
+  return [
+    `Current model: \`${currentModel}\``,
+    "",
+    "Presets",
+    ...presetLines,
+    "",
+    "You can also run `:model your-model-id` to set any Shopify gateway model directly.",
+  ].join("\n");
+}
+
+function resolveModelCommand(input: string) {
+  const value = input.trim();
+  if (!value) {
+    return null;
+  }
+
+  if (value in MODEL_PRESETS) {
+    return MODEL_PRESETS[value as ModelPresetName];
+  }
+
+  return value || null;
 }
 
 function roleTheme(role: ChatRole) {
@@ -524,18 +597,11 @@ function moveComposerCursorToEnd(value: string) {
 }
 
 function currentUpmergeItems() {
-  if (upmergeScope === "lines") {
-    return upmergeLineItems;
-  }
-
-  if (!upmergeFileItems.length) {
+  if (!upmergeItems.length) {
     return [];
   }
 
-  return [
-    { label: "Upmerge all pending files", kind: "all", path: null },
-    ...upmergeFileItems,
-  ];
+  return [{ label: "Upmerge all pending files", path: null }, ...upmergeItems];
 }
 
 function selectedUpmergeItem() {
@@ -553,14 +619,7 @@ async function refreshUpmergePreview() {
   }
 
   const selected = selectedUpmergeItem();
-  if (!selected) {
-    upmergePreviewText.content =
-      upmergeScope === "lines" ? "No pending line changes." : "No pending upmerges.";
-  } else if (selected.kind === "line" && selected.path && selected.changeId) {
-    upmergePreviewText.content = await getUpmergeLinePreview(selected.path, selected.changeId);
-  } else {
-    upmergePreviewText.content = await getUpmergePreview(selected.path ?? undefined);
-  }
+  upmergePreviewText.content = await getUpmergePreview(selected?.path ?? undefined);
   renderer.requestRender();
 }
 
@@ -568,21 +627,10 @@ async function refreshUpmergeState() {
   const status = await getUpmergeStatus();
   upmergeMode = status.mode;
   upmergeNote = status.note;
-  upmergeFileItems = status.pendingFiles.map((entry) => ({
+  upmergeItems = status.pendingFiles.map((entry) => ({
     label: entry,
-    kind: "file",
     path: entry,
   }));
-  upmergeLineItems = status.pendingLineChanges.map((entry) => ({
-    label: `${entry.relativePath}: ${entry.summary}`,
-    kind: "line",
-    path: entry.relativePath,
-    changeId: entry.id,
-  }));
-
-  if (upmergeScope === "lines" && !upmergeLineItems.length) {
-    upmergeScope = "files";
-  }
 
   const items = currentUpmergeItems();
   if (!items.length) {
@@ -637,60 +685,19 @@ async function moveUpmergeSelection(delta: number) {
   updateSidebar();
 }
 
-async function setUpmergeScope(scope: UpmergeScope) {
-  if (scope === upmergeScope) {
-    return;
-  }
-
-  upmergeScope = scope;
-  upmergeSelection = 0;
-  await refreshUpmergePreview();
-  updateSidebar();
-}
-
 async function runUpmergeSelection() {
   const selected = selectedUpmergeItem();
   if (!selected) {
-    updateSidebar(
-      upmergeScope === "lines" ? "No pending line changes." : "No pending upmerges."
-    );
+    updateSidebar("No pending upmerges.");
     renderer.requestRender();
     return;
   }
 
   try {
     const message =
-      selected.kind === "all"
+      selected.path === null
         ? await upmergeAll()
-        : selected.kind === "line" && selected.path && selected.changeId
-          ? await upmergeLineChange(selected.path, selected.changeId)
-          : selected.path
-            ? await upmergeRelativePath(selected.path)
-            : "No pending upmerges.";
-    appendEntry("system", message);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    appendEntry("error", message);
-  }
-
-  await refreshUpmergeState();
-}
-
-async function revertUpmergeSelection() {
-  const selected = selectedUpmergeItem();
-  if (!selected || selected.kind === "all") {
-    updateSidebar("Select a file or line to revert.");
-    renderer.requestRender();
-    return;
-  }
-
-  try {
-    const message =
-      selected.kind === "line" && selected.path && selected.changeId
-        ? await revertLineChange(selected.path, selected.changeId)
-        : selected.path
-          ? await revertRelativePath(selected.path)
-          : "Select a file or line to revert.";
+        : await upmergeRelativePath(selected.path);
     appendEntry("system", message);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -722,7 +729,7 @@ function setMode(nextMode: Mode) {
   } else if (mode === "command") {
     composer.title = ":";
     composer.borderColor = "#f59e0b";
-    input.placeholder = "clear  quit";
+    input.placeholder = "clear  model anthropic  quit";
     setComposerText(commandDraft);
     process.nextTick(() => {
       if (mode === "command") {
@@ -734,7 +741,7 @@ function setMode(nextMode: Mode) {
   } else {
     composer.title = "-- NORMAL --";
     composer.borderColor = "#334155";
-    input.placeholder = "Press i to insert, : for commands, or u for pending edits";
+    input.placeholder = "Press i to insert, : for commands, or u for upmerge";
     setComposerText("");
     input.blur();
   }
@@ -798,22 +805,16 @@ function updateSidebar(note = "Ready for your next prompt.") {
     sidebar.borderColor = "#22c55e";
     sidebarText.content = [
       `Edits: ${upmergeMode}`,
-      `Scope: ${upmergeScope}`,
-      `Files: ${upmergeFileItems.length}`,
-      `Lines: ${upmergeLineItems.length}`,
+      `Pending: ${upmergeItems.length}`,
       "",
       items.length
         ? items
             .map((item, index) => `${index === upmergeSelection ? ">" : " "} ${item.label}`)
             .join("\n")
-        : upmergeScope === "lines"
-          ? "No pending line changes."
-          : "No pending upmerges.",
+        : "No pending upmerges.",
       "",
       "Shortcuts",
       "Enter  upmerge selected item",
-      "r      revert selected item",
-      "f / l  switch file or line scope",
       "j / k  change selection",
       "u/Esc  close menu",
       "",
@@ -828,24 +829,26 @@ function updateSidebar(note = "Ready for your next prompt.") {
     `Status: ${busy ? "streaming" : "idle"}`,
     `Mode: ${mode}`,
     `Messages: ${entries.length}`,
+    `Model: ${currentModel}`,
     `Edits: ${upmergeMode}`,
-    `Pending files: ${upmergeFileItems.length}`,
-    `Pending lines: ${upmergeLineItems.length}`,
+    `Upmerges: ${upmergeItems.length}`,
     "",
     "Shortcuts",
     "i      insert mode",
     ":      command mode",
     "j / k  scroll transcript",
-    "u      pending edits menu",
+    "u      upmerge menu",
     "Esc    normal mode",
     "Ctrl+C abort stream",
     "",
     "Commands",
     ":clear reset conversation",
+    ":model switch providers",
     ":quit  exit UI",
     "",
-    "Backend",
-    BACKEND_URL,
+    "Gateway",
+    "OPENAI_API_BASE",
+    "OPENAI_API_KEY",
     "",
     upmergeNote,
     "",
@@ -861,8 +864,7 @@ function updateComposerHint() {
   }
 
   if (upmergeMenuOpen) {
-    composerHint.content =
-      "Pending edits menu open. Enter upmerges, r reverts, f/l switches scope, and u/Esc closes.";
+    composerHint.content = "Upmerge menu open. Enter applies the selected diff, u/Esc closes it.";
     return;
   }
 
@@ -874,13 +876,13 @@ function updateComposerHint() {
 
   if (mode === "normal") {
     composerHint.content =
-      "Normal mode. Press i to compose, : for commands, u for pending edits, or j/k to scroll.";
+      "Normal mode. Press i to compose, : for commands, u for upmerge, or j/k to scroll.";
     return;
   }
 
   if (mode === "command") {
     composerHint.content =
-      "Command mode. Run :clear or :quit, or press Esc to return to normal.";
+      "Command mode. Run :clear, :model, or :quit, or press Esc to return to normal.";
     return;
   }
 
@@ -967,6 +969,47 @@ async function executeCommand(raw: string) {
     return;
   }
 
+  if (command === "model") {
+    appendEntry("system", describeModelOptions());
+    commandDraft = "";
+    setMode("normal");
+    return;
+  }
+
+  if (command.startsWith("model ")) {
+    const requestedModel = resolveModelCommand(command.slice("model".length));
+
+    if (!requestedModel) {
+      appendEntry(
+        "error",
+        [
+          `Unknown model target: \`${command.slice("model".length).trim()}\`.`,
+          "",
+          describeModelOptions(),
+        ].join("\n")
+      );
+      commandDraft = "";
+      setMode("normal");
+      return;
+    }
+
+    currentModel = requestedModel;
+    try {
+      await savePersistedConfig({ currentModel });
+      appendEntry("system", `Switched model to \`${currentModel}\`. Future sessions will reuse it.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      appendEntry(
+        "error",
+        `Switched model to \`${currentModel}\`, but failed to save it for future sessions.\n\n${message}`
+      );
+    }
+    updateSidebar(`Using ${currentModel} for the next prompt.`);
+    commandDraft = "";
+    setMode("normal");
+    return;
+  }
+
   if (command === "quit" || command === "q") {
     await shutdown();
     return;
@@ -1002,109 +1045,96 @@ async function submitPrompt() {
   insertDraft = "";
   input.setText("");
   setMode("normal");
-  updateSidebar("Connecting to the local agent backend...");
+  updateSidebar(`Connecting to ${currentModel}...`);
   let streamAborted = false;
 
   try {
-    let run = true;
     let sawAssistantOutput = false;
+    let sawToolActivity = false;
+    const streamAbortController = new AbortController();
+    activeStreamAbortController = streamAbortController;
 
-    while (run) {
-      const streamAbortController = new AbortController();
-      activeStreamAbortController = streamAbortController;
+    let assistantEntry: ChatEntry | null = null;
+    let assistantContent = "";
 
-      let assistantEntry: ChatEntry | null = null;
-      let assistantContent = "";
-      const toolCalls: ToolCall[] = [];
+    try {
+      const result = streamResponse({
+        model: currentModel,
+        messages: conversation,
+        tools,
+        abortSignal: streamAbortController.signal,
+      });
 
-      try {
-        const stream = await streamResponse({
-          messages: conversation,
-          tools,
-          abortSignal: streamAbortController.signal,
-        });
-
-        await stream.pipeTo(
-          new WritableStream<ResponseChunk>({
-            write(chunk) {
-              if (chunk.reasoning) {
-                updateSidebar("Model is reasoning...");
-              }
-
-              if (chunk.content) {
-                if (!assistantEntry) {
-                  assistantEntry = appendEntry("assistant", "");
-                }
-                assistantContent += chunk.content;
-                assistantEntry.body.content = assistantContent || " ";
-                sawAssistantOutput = true;
-                renderer.requestRender();
-                scrollToBottom();
-              }
-
-              if (chunk.toolCall) {
-                collectToolCall(toolCalls, chunk.toolCall);
-                const toolName =
-                  "id" in chunk.toolCall
-                    ? chunk.toolCall.function.name
-                    : toolCalls[chunk.toolCall.index]?.function.name || "tool-call";
-                updateSidebar(`Tool requested: ${toolName}`);
-              }
-            },
-          }),
-          {
-            signal: streamAbortController.signal,
-          }
-        );
-      } catch (error) {
-        if (
-          streamAbortController.signal.aborted ||
-          (error instanceof DOMException && error.name === "AbortError")
-        ) {
-          streamAborted = true;
-          updateSidebar("Streaming aborted.");
-          break;
+      for await (const chunk of result.stream) {
+        switch (chunk.type) {
+          case "reasoning":
+            updateSidebar("Model is reasoning...");
+            break;
+          case "content":
+            if (!assistantEntry) {
+              assistantEntry = appendEntry("assistant", "");
+            }
+            assistantContent += chunk.content;
+            assistantEntry.body.content = assistantContent || " ";
+            sawAssistantOutput = true;
+            renderer.requestRender();
+            scrollToBottom();
+            break;
+          case "tool-call-start":
+            sawToolActivity = true;
+            updateSidebar(`Tool requested: ${chunk.toolName}`);
+            break;
+          case "tool-call-delta":
+            sawToolActivity = true;
+            updateSidebar(`Preparing tool input: ${chunk.toolName}`);
+            break;
+          case "tool-result":
+            sawToolActivity = true;
+            appendEntry(
+              "system",
+              [`Tool \`${chunk.toolName}\` completed.`, "", formatToolOutput(chunk.output)].join(
+                "\n"
+              )
+            );
+            await refreshUpmergeState();
+            updateSidebar(`Tool completed: ${chunk.toolName}`);
+            break;
         }
+      }
+
+      const responseMessages = await result.responseMessages;
+      conversation.push(...responseMessages);
+
+      if (!assistantContent.trim() && !sawAssistantOutput) {
+        const finalAssistantText = extractAssistantText(responseMessages);
+        if (finalAssistantText.trim()) {
+          appendEntry("assistant", finalAssistantText);
+          sawAssistantOutput = true;
+          assistantContent = finalAssistantText;
+        }
+      }
+    } catch (error) {
+      if (
+        streamAbortController.signal.aborted ||
+        (error instanceof DOMException && error.name === "AbortError")
+      ) {
+        streamAborted = true;
+        updateSidebar("Streaming aborted.");
+      } else {
         throw error;
-      } finally {
-        if (activeStreamAbortController === streamAbortController) {
-          activeStreamAbortController = null;
-        }
       }
+    } finally {
+      if (activeStreamAbortController === streamAbortController) {
+        activeStreamAbortController = null;
+      }
+    }
 
-      if (streamAborted) {
-        break;
-      }
+    if (!streamAborted && !assistantContent.trim() && !sawAssistantOutput && !sawToolActivity) {
+      appendEntry("assistant", "The model returned an empty response. Try another prompt.");
+    }
 
-      if (assistantContent.trim()) {
-        conversation.push({
-          role: "assistant",
-          content: assistantContent,
-        });
-      }
-
-      if (!toolCalls.length) {
-        if (!assistantContent.trim() && !sawAssistantOutput) {
-          appendEntry(
-            "assistant",
-            "The backend returned an empty response. Try another prompt."
-          );
-        }
-        updateSidebar("Streaming complete.");
-        run = false;
-        continue;
-      }
-
-      for (const toolCall of toolCalls) {
-        updateSidebar(`Running tool: ${toolCall.function.name}`);
-        const toolResult = await executeToolCall(toolCall, loadedTools);
-        conversation.push(toolResult);
-        appendEntry(
-          "system",
-          [`Tool \`${toolCall.function.name}\` completed.`, "", toolResult.content].join("\n")
-        );
-        await refreshUpmergeState();
-      }
+    if (!streamAborted) {
+      updateSidebar("Streaming complete.");
     }
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
@@ -1115,7 +1145,7 @@ async function submitPrompt() {
 
     const message = error instanceof Error ? error.message : String(error);
     appendEntry("error", `Request failed.\n\n${message}`);
-    updateSidebar("Request failed. Check that the local backend is running.");
+    updateSidebar("Request failed. Check your model selection and AI provider credentials.");
   } finally {
     busy = false;
     updateComposerHint();
@@ -1156,16 +1186,10 @@ function handleGlobalKey(key: KeyEvent) {
   if (upmergeMenuOpen) {
     if (key.name === "escape" || key.name === "u") {
       closeUpmergeMenu();
-    } else if (key.name === "f") {
-      void setUpmergeScope("files");
-    } else if (key.name === "l") {
-      void setUpmergeScope("lines");
     } else if (key.name === "j" || key.name === "down") {
       void moveUpmergeSelection(1);
     } else if (key.name === "k" || key.name === "up") {
       void moveUpmergeSelection(-1);
-    } else if (key.name === "r") {
-      void revertUpmergeSelection();
     } else if (key.name === "enter" || key.name === "return") {
       void runUpmergeSelection();
     }

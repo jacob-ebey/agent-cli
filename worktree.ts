@@ -11,32 +11,6 @@ type BaselineRecord = {
   exists: boolean;
 };
 
-export type PendingLineChange = {
-  id: string;
-  relativePath: string;
-  kind: "replace" | "add" | "remove";
-  originalLineNumber: number;
-  currentLineNumber: number;
-  originalText: string | null;
-  currentText: string | null;
-  summary: string;
-};
-
-type ParsedDiffHunk = {
-  originalStart: number;
-  originalCount: number;
-  currentStart: number;
-  currentCount: number;
-  removedLines: string[];
-  addedLines: string[];
-};
-
-type TextDocument = {
-  lines: string[];
-  lineEnding: string;
-  hadTrailingLineEnding: boolean;
-};
-
 type SessionState =
   | {
       initialized: false;
@@ -66,7 +40,6 @@ export type UpmergeStatus = {
   mode: "direct" | "worktree";
   note: string;
   pendingFiles: string[];
-  pendingLineChanges: PendingLineChange[];
 };
 
 let sessionState: SessionState = {
@@ -81,23 +54,6 @@ let ensureSessionPromise: Promise<SessionState> | null = null;
 
 function toPortablePath(relativePath: string) {
   return relativePath.split(path.sep).join("/");
-}
-
-function clipLinePreview(value: string | null, maxLength = 48) {
-  if (value === null) {
-    return "";
-  }
-
-  const normalized = value.replace(/\t/g, "  ");
-  if (normalized.length <= maxLength) {
-    return normalized;
-  }
-
-  return `${normalized.slice(0, maxLength - 3)}...`;
-}
-
-function formatLineReference(lineNumber: number) {
-  return lineNumber > 0 ? `line ${lineNumber}` : "start of file";
 }
 
 function isInsideRoot(root: string, targetPath: string) {
@@ -176,41 +132,6 @@ async function readFileIfExists(targetPath: string) {
   return await fs.readFile(targetPath);
 }
 
-function deserializeTextDocument(raw: string): TextDocument {
-  if (!raw.length) {
-    return {
-      lines: [],
-      lineEnding: "\n",
-      hadTrailingLineEnding: false,
-    };
-  }
-
-  const lineEnding = raw.includes("\r\n") ? "\r\n" : "\n";
-  const normalized = raw.replace(/\r\n/g, "\n");
-  const hadTrailingLineEnding = normalized.endsWith("\n");
-  const trimmed = hadTrailingLineEnding ? normalized.slice(0, -1) : normalized;
-
-  return {
-    lines: trimmed.length ? trimmed.split("\n") : [],
-    lineEnding,
-    hadTrailingLineEnding,
-  };
-}
-
-function serializeTextDocument(document: TextDocument) {
-  const body = document.lines.join(document.lineEnding);
-  return document.hadTrailingLineEnding ? `${body}${document.lineEnding}` : body;
-}
-
-async function readTextDocumentIfExists(targetPath: string) {
-  const raw = await readFileIfExists(targetPath);
-  if (raw === null) {
-    return null;
-  }
-
-  return deserializeTextDocument(raw.toString("utf-8"));
-}
-
 async function filesEqual(leftPath: string | null, rightPath: string | null) {
   const [left, right] = await Promise.all([
     leftPath ? readFileIfExists(leftPath) : Promise.resolve(null),
@@ -222,6 +143,18 @@ async function filesEqual(leftPath: string | null, rightPath: string | null) {
   }
 
   return left.equals(right);
+}
+
+function buffersEqual(left: Buffer | null, right: Buffer | null) {
+  if (left === null || right === null) {
+    return left === right;
+  }
+
+  return left.equals(right);
+}
+
+function isProbablyBinary(content: Buffer | null) {
+  return content?.includes(0) ?? false;
 }
 
 async function detectGitRoot() {
@@ -369,19 +302,13 @@ async function writeBaseline(relativePath: string, contentPath: string | null) {
   sessionState.trackedFiles.set(relativePath, record);
 }
 
-async function buildDiffFromPaths(
-  relativePath: string,
-  beforePath: string | null,
-  afterPath: string,
-  contextLines = 3
-) {
+async function buildDiffFromPaths(relativePath: string, beforePath: string | null, afterPath: string) {
   const labelPath = toPortablePath(relativePath);
   const args = [
     "diff",
     "--no-index",
     "--binary",
     "--no-ext-diff",
-    `--unified=${contextLines}`,
     beforePath ?? DEV_NULL_PATH,
     afterPath,
   ];
@@ -399,116 +326,6 @@ async function buildDiffFromPaths(
     .replace(/^--- .+$/m, `--- ${beforeLabel}`)
     .replace(/^\+\+\+ .+$/m, `+++ ${afterLabel}`)
     .trim();
-}
-
-function parseDiffCount(value: string | undefined) {
-  return value === undefined ? 1 : Number(value);
-}
-
-function parseUnifiedDiffHunks(diff: string) {
-  const hunks: ParsedDiffHunk[] = [];
-  let current: ParsedDiffHunk | null = null;
-
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("@@")) {
-      const match = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
-      if (!match) {
-        continue;
-      }
-
-      current = {
-        originalStart: Number(match[1]),
-        originalCount: parseDiffCount(match[2]),
-        currentStart: Number(match[3]),
-        currentCount: parseDiffCount(match[4]),
-        removedLines: [],
-        addedLines: [],
-      };
-      hunks.push(current);
-      continue;
-    }
-
-    if (!current || !line.length || line.startsWith("\\")) {
-      continue;
-    }
-
-    if (line.startsWith("-")) {
-      current.removedLines.push(line.slice(1));
-    } else if (line.startsWith("+")) {
-      current.addedLines.push(line.slice(1));
-    }
-  }
-
-  return hunks;
-}
-
-function summarizeLineChange(change: PendingLineChange) {
-  switch (change.kind) {
-    case "replace":
-      return `${formatLineReference(change.originalLineNumber)} replace ${clipLinePreview(change.originalText)} -> ${clipLinePreview(change.currentText)}`;
-    case "add":
-      return `${formatLineReference(change.originalLineNumber)} add ${clipLinePreview(change.currentText)}`;
-    case "remove":
-      return `${formatLineReference(change.originalLineNumber)} remove ${clipLinePreview(change.originalText)}`;
-  }
-}
-
-function buildPendingLineChanges(relativePath: string, diff: string) {
-  const hunks = parseUnifiedDiffHunks(diff);
-  const changes: PendingLineChange[] = [];
-
-  hunks.forEach((hunk, hunkIndex) => {
-    const pairedCount = Math.min(hunk.removedLines.length, hunk.addedLines.length);
-    const extraRemoveCurrentLine = hunk.currentStart + pairedCount;
-    const extraAddOriginalLine = hunk.originalStart + pairedCount;
-
-    for (let index = 0; index < pairedCount; index += 1) {
-      const change: PendingLineChange = {
-        id: `${hunkIndex}:${changes.length}`,
-        relativePath,
-        kind: "replace",
-        originalLineNumber: hunk.originalStart + index,
-        currentLineNumber: hunk.currentStart + index,
-        originalText: hunk.removedLines[index] ?? null,
-        currentText: hunk.addedLines[index] ?? null,
-        summary: "",
-      };
-      change.summary = summarizeLineChange(change);
-      changes.push(change);
-    }
-
-    for (let index = pairedCount; index < hunk.removedLines.length; index += 1) {
-      const change: PendingLineChange = {
-        id: `${hunkIndex}:${changes.length}`,
-        relativePath,
-        kind: "remove",
-        originalLineNumber: hunk.originalStart + index,
-        currentLineNumber: extraRemoveCurrentLine,
-        originalText: hunk.removedLines[index] ?? null,
-        currentText: null,
-        summary: "",
-      };
-      change.summary = summarizeLineChange(change);
-      changes.push(change);
-    }
-
-    for (let index = pairedCount; index < hunk.addedLines.length; index += 1) {
-      const change: PendingLineChange = {
-        id: `${hunkIndex}:${changes.length}`,
-        relativePath,
-        kind: "add",
-        originalLineNumber: extraAddOriginalLine,
-        currentLineNumber: hunk.currentStart + index,
-        originalText: null,
-        currentText: hunk.addedLines[index] ?? null,
-        summary: "",
-      };
-      change.summary = summarizeLineChange(change);
-      changes.push(change);
-    }
-  });
-
-  return changes;
 }
 
 async function hasPendingDiff(relativePath: string) {
@@ -544,129 +361,77 @@ async function getPatchForRelativePath(relativePath: string) {
   return await buildDiffFromPaths(relativePath, record.baselinePath, worktreePath);
 }
 
-async function getPendingLineChangesForRelativePath(relativePath: string) {
-  if (sessionState.mode !== "worktree") {
-    return [] as PendingLineChange[];
+async function readWorkspaceVersion(targetPath: string | null) {
+  if (targetPath === null) {
+    return {
+      exists: false,
+      content: null,
+    };
   }
 
-  const record = getBaselineRecord(relativePath);
-  if (!record) {
-    return [] as PendingLineChange[];
-  }
-
-  const worktreePath = path.join(sessionState.worktreeWorkspaceRoot, relativePath);
-  const pending = await hasPendingDiff(relativePath);
-  if (!pending) {
-    return [] as PendingLineChange[];
-  }
-
-  const diff = await buildDiffFromPaths(relativePath, record.baselinePath, worktreePath, 0);
-  return buildPendingLineChanges(relativePath, diff);
+  const content = await readFileIfExists(targetPath);
+  return {
+    exists: content !== null,
+    content,
+  };
 }
 
-function lineIndexFromReference(lineNumber: number, lineCount: number) {
-  if (lineNumber <= 0) {
-    return 0;
+async function writeWorkspaceVersion(targetPath: string, content: Buffer | null) {
+  if (content === null) {
+    await fs.rm(targetPath, { force: true });
+    return;
   }
 
-  return Math.min(lineNumber - 1, lineCount);
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  await fs.writeFile(targetPath, content);
 }
 
-function assertLineValue(
-  lines: string[],
-  index: number,
-  expected: string,
-  label: string,
-  relativePath: string
-) {
-  if (index < 0 || index >= lines.length) {
-    throw new Error(`Unable to update ${relativePath}: ${label} is outside the file.`);
-  }
-
-  if (lines[index] !== expected) {
-    throw new Error(`Unable to update ${relativePath}: ${label} no longer matches the expected text.`);
-  }
-}
-
-function applyLineChangeToDocument(
-  document: TextDocument,
+async function mergeTextFileVersions(
   relativePath: string,
-  change: PendingLineChange,
-  direction: "upmerge" | "revert"
+  currentContent: Buffer | null,
+  baselineContent: Buffer | null,
+  editedContent: Buffer | null
 ) {
-  switch (change.kind) {
-    case "replace": {
-      const lineNumber =
-        direction === "upmerge" ? change.originalLineNumber : change.currentLineNumber;
-      const index = lineIndexFromReference(lineNumber, document.lines.length);
-      const expected = direction === "upmerge" ? change.originalText : change.currentText;
-      const next = direction === "upmerge" ? change.currentText : change.originalText;
+  const mergeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "agent-cli-merge-"));
+  const currentPath = path.join(mergeRoot, "current");
+  const baselinePath = path.join(mergeRoot, "baseline");
+  const editedPath = path.join(mergeRoot, "edited");
 
-      if (expected === null || next === null) {
-        throw new Error(`Unable to update ${relativePath}: line change data is incomplete.`);
-      }
+  try {
+    await Promise.all([
+      fs.writeFile(currentPath, currentContent ?? ""),
+      fs.writeFile(baselinePath, baselineContent ?? ""),
+      fs.writeFile(editedPath, editedContent ?? ""),
+    ]);
 
-      assertLineValue(
-        document.lines,
-        index,
-        expected,
-        formatLineReference(lineNumber),
-        relativePath
-      );
-      document.lines[index] = next;
-      return;
+    const result = await runCommand(
+      "git",
+      [
+        "merge-file",
+        "--stdout",
+        "-L",
+        `current/${toPortablePath(relativePath)}`,
+        "-L",
+        `baseline/${toPortablePath(relativePath)}`,
+        "-L",
+        `edited/${toPortablePath(relativePath)}`,
+        currentPath,
+        baselinePath,
+        editedPath,
+      ],
+      ORIGINAL_WORKSPACE_ROOT
+    );
+
+    if (result.exitCode !== 0 && result.exitCode !== 1) {
+      throw new Error(result.stderr.trim() || `Failed to merge ${relativePath}.`);
     }
-    case "add": {
-      if (direction === "upmerge") {
-        if (change.currentText === null) {
-          throw new Error(`Unable to update ${relativePath}: line change data is incomplete.`);
-        }
 
-        const index = lineIndexFromReference(change.originalLineNumber, document.lines.length);
-        document.lines.splice(index, 0, change.currentText);
-        return;
-      }
-
-      if (change.currentText === null) {
-        throw new Error(`Unable to update ${relativePath}: line change data is incomplete.`);
-      }
-
-      const index = lineIndexFromReference(change.currentLineNumber, document.lines.length);
-      assertLineValue(
-        document.lines,
-        index,
-        change.currentText,
-        formatLineReference(change.currentLineNumber),
-        relativePath
-      );
-      document.lines.splice(index, 1);
-      return;
-    }
-    case "remove": {
-      if (direction === "upmerge") {
-        if (change.originalText === null) {
-          throw new Error(`Unable to update ${relativePath}: line change data is incomplete.`);
-        }
-
-        const index = lineIndexFromReference(change.originalLineNumber, document.lines.length);
-        assertLineValue(
-          document.lines,
-          index,
-          change.originalText,
-          formatLineReference(change.originalLineNumber),
-          relativePath
-        );
-        document.lines.splice(index, 1);
-        return;
-      }
-
-      if (change.originalText === null) {
-        throw new Error(`Unable to update ${relativePath}: line change data is incomplete.`);
-      }
-
-      const index = lineIndexFromReference(change.currentLineNumber, document.lines.length);
-      document.lines.splice(index, 0, change.originalText);
-    }
+    return {
+      content: Buffer.from(result.stdout, "utf8"),
+      hasConflicts: result.exitCode === 1,
+    };
+  } finally {
+    await fs.rm(mergeRoot, { recursive: true, force: true });
   }
 }
 
@@ -678,11 +443,6 @@ async function advanceBaseline(relativePath: string) {
   const worktreePath = path.join(sessionState.worktreeWorkspaceRoot, relativePath);
   const stat = await statIfExists(worktreePath);
   await writeBaseline(relativePath, stat?.isFile() ? worktreePath : null);
-}
-
-async function getPendingLineChange(relativePath: string, changeId: string) {
-  const changes = await getPendingLineChangesForRelativePath(relativePath);
-  return changes.find((change) => change.id === changeId) ?? null;
 }
 
 export function getOriginalWorkspaceRoot() {
@@ -737,31 +497,17 @@ export async function trackEditTarget(targetPath: string) {
 export async function getUpmergeStatus(): Promise<UpmergeStatus> {
   if (sessionState.mode === "worktree") {
     const pendingFiles: string[] = [];
-    const pendingLineChanges: PendingLineChange[] = [];
-
     for (const relativePath of sessionState.trackedFiles.keys()) {
-      if (!(await hasPendingDiff(relativePath))) {
-        continue;
+      if (await hasPendingDiff(relativePath)) {
+        pendingFiles.push(relativePath);
       }
-
-      pendingFiles.push(relativePath);
-      pendingLineChanges.push(...(await getPendingLineChangesForRelativePath(relativePath)));
     }
 
     pendingFiles.sort((left, right) => left.localeCompare(right));
-    pendingLineChanges.sort(
-      (left, right) =>
-        left.relativePath.localeCompare(right.relativePath) ||
-        left.originalLineNumber - right.originalLineNumber ||
-        left.currentLineNumber - right.currentLineNumber ||
-        left.id.localeCompare(right.id)
-    );
-
     return {
       mode: "worktree",
       note: sessionState.note,
       pendingFiles,
-      pendingLineChanges,
     };
   }
 
@@ -773,7 +519,6 @@ export async function getUpmergeStatus(): Promise<UpmergeStatus> {
         ? "A git worktree will be created on the first edit."
         : "Git worktrees are unavailable here, so edits apply directly.",
       pendingFiles: [],
-      pendingLineChanges: [],
     };
   }
 
@@ -781,7 +526,6 @@ export async function getUpmergeStatus(): Promise<UpmergeStatus> {
     mode: "direct",
     note: sessionState.note,
     pendingFiles: [],
-    pendingLineChanges: [],
   };
 }
 
@@ -801,85 +545,72 @@ export async function getUpmergePreview(relativePath?: string) {
   return combined || "No pending upmerges.";
 }
 
-export async function getUpmergeLinePreview(relativePath: string, changeId: string) {
-  const status = await getUpmergeStatus();
-  if (status.mode !== "worktree") {
-    return `${status.note}\n\nThere are no pending upmerges.`;
-  }
-
-  const change = await getPendingLineChange(relativePath, changeId);
-  if (!change) {
-    return `No pending line change found for ${relativePath}.`;
-  }
-
-  return [
-    relativePath,
-    change.summary,
-    "",
-    change.originalText === null ? "- (no previous line)" : `- ${change.originalText}`,
-    change.currentText === null ? "+ (line removed)" : `+ ${change.currentText}`,
-  ].join("\n");
-}
-
 export async function upmergeRelativePath(relativePath: string) {
   const status = await getUpmergeStatus();
   if (status.mode !== "worktree") {
     return status.note;
   }
-
-  const patch = await getPatchForRelativePath(relativePath);
-  if (!patch) {
-    return `No pending changes for ${relativePath}.`;
-  }
-
-  const result = await runCommand(
-    "git",
-    ["apply", "--whitespace=nowarn", "-"],
-    ORIGINAL_WORKSPACE_ROOT,
-    `${patch}\n`
-  );
-
-  if (result.exitCode !== 0) {
-    throw new Error(
-      result.stderr.trim() || `Failed to upmerge ${relativePath} into the main workspace.`
-    );
-  }
-
-  await advanceBaseline(relativePath);
-  return `Upmerged ${relativePath} into the main workspace.`;
-}
-
-export async function upmergeLineChange(relativePath: string, changeId: string) {
-  const status = await getUpmergeStatus();
-  if (status.mode !== "worktree") {
-    return status.note;
-  }
-
   if (sessionState.mode !== "worktree") {
     return status.note;
   }
 
-  const change = await getPendingLineChange(relativePath, changeId);
-  if (!change) {
-    return `No pending line change found for ${relativePath}.`;
+  const record = getBaselineRecord(relativePath);
+  if (!record) {
+    return `No pending changes for ${relativePath}.`;
   }
 
-  const targetPath = path.join(ORIGINAL_WORKSPACE_ROOT, relativePath);
+  const originalPath = path.join(ORIGINAL_WORKSPACE_ROOT, relativePath);
   const worktreePath = path.join(sessionState.worktreeWorkspaceRoot, relativePath);
-  const targetDocument = await readTextDocumentIfExists(targetPath);
-  const worktreeDocument = await readTextDocumentIfExists(worktreePath);
-  const document = targetDocument ?? {
-    lines: [],
-    lineEnding: worktreeDocument?.lineEnding ?? "\n",
-    hadTrailingLineEnding: worktreeDocument?.hadTrailingLineEnding ?? false,
-  };
+  const [baseline, current, edited] = await Promise.all([
+    readWorkspaceVersion(record.baselinePath),
+    readWorkspaceVersion(originalPath),
+    readWorkspaceVersion(worktreePath),
+  ]);
 
-  applyLineChangeToDocument(document, relativePath, change, "upmerge");
-  await fs.mkdir(path.dirname(targetPath), { recursive: true });
-  await fs.writeFile(targetPath, serializeTextDocument(document), "utf-8");
-  await writeBaseline(relativePath, targetPath);
+  if (buffersEqual(baseline.content, edited.content)) {
+    return `No pending changes for ${relativePath}.`;
+  }
 
-  return `Upmerged ${change.summary} from ${relativePath}.`;
+  if (buffersEqual(current.content, edited.content)) {
+    await advanceBaseline(relativePath);
+    return `Upmerged ${relativePath} into the main workspace.`;
+  }
+
+  if (buffersEqual(current.content, baseline.content)) {
+    await writeWorkspaceVersion(originalPath, edited.content);
+    await advanceBaseline(relativePath);
+    return `Upmerged ${relativePath} into the main workspace.`;
+  }
+
+  if (
+    isProbablyBinary(current.content) ||
+    isProbablyBinary(baseline.content) ||
+    isProbablyBinary(edited.content)
+  ) {
+    throw new Error(
+      `Upmerge conflict for ${relativePath}: both the main workspace and agent worktree changed a binary file.`
+    );
+  }
+
+  const merged = await mergeTextFileVersions(
+    relativePath,
+    current.content,
+    baseline.content,
+    edited.content
+  );
+
+  if (merged.hasConflicts) {
+    throw new Error(
+      `Upmerge conflict for ${relativePath}: both the main workspace and agent worktree changed overlapping lines.`
+    );
+  }
+
+  await writeWorkspaceVersion(
+    originalPath,
+    !edited.exists && merged.content.length === 0 ? null : merged.content
+  );
+  await advanceBaseline(relativePath);
+  return `Upmerged ${relativePath} into the main workspace.`;
 }
 
 export async function upmergeAll() {
@@ -903,61 +634,6 @@ export async function upmergeAll() {
   }
 
   return results.join("\n");
-}
-
-export async function revertRelativePath(relativePath: string) {
-  const status = await getUpmergeStatus();
-  if (status.mode !== "worktree") {
-    return status.note;
-  }
-
-  if (sessionState.mode !== "worktree") {
-    return status.note;
-  }
-
-  const record = getBaselineRecord(relativePath);
-  if (!record || !(await hasPendingDiff(relativePath))) {
-    return `No pending changes for ${relativePath}.`;
-  }
-
-  const worktreePath = path.join(sessionState.worktreeWorkspaceRoot, relativePath);
-  if (record.exists && record.baselinePath) {
-    await fs.mkdir(path.dirname(worktreePath), { recursive: true });
-    await fs.copyFile(record.baselinePath, worktreePath);
-  } else {
-    await fs.rm(worktreePath, { force: true });
-  }
-
-  return `Reverted pending changes for ${relativePath} in the agent worktree.`;
-}
-
-export async function revertLineChange(relativePath: string, changeId: string) {
-  const status = await getUpmergeStatus();
-  if (status.mode !== "worktree") {
-    return status.note;
-  }
-
-  if (sessionState.mode !== "worktree") {
-    return status.note;
-  }
-
-  const change = await getPendingLineChange(relativePath, changeId);
-  if (!change) {
-    return `No pending line change found for ${relativePath}.`;
-  }
-
-  const worktreePath = path.join(sessionState.worktreeWorkspaceRoot, relativePath);
-  const document = (await readTextDocumentIfExists(worktreePath)) ?? {
-    lines: [],
-    lineEnding: "\n",
-    hadTrailingLineEnding: false,
-  };
-
-  applyLineChangeToDocument(document, relativePath, change, "revert");
-  await fs.mkdir(path.dirname(worktreePath), { recursive: true });
-  await fs.writeFile(worktreePath, serializeTextDocument(document), "utf-8");
-
-  return `Reverted ${change.summary} in ${relativePath}.`;
 }
 
 export async function cleanupWorkspaceSession() {

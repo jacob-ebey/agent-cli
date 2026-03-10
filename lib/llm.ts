@@ -1,145 +1,210 @@
-import { EventStreamDecoder, type EventChunk } from "./event-stream-decoder.ts";
+import {
+  dynamicTool,
+  jsonSchema,
+  stepCountIs,
+  streamText,
+  type ModelMessage,
+} from "ai";
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 
-export type Message =
-  | {
-      role: "system";
-      content: string;
-    }
-  | {
-      role: "user";
-      content: string;
-    }
-  | {
-      role: "assistant";
-      content: string;
-    }
-  | {
-      role: "tool";
-      content: string;
-      tool_call_id: string;
-      name: string;
-      arguments: string;
-    };
+export type Message = ModelMessage;
 
 export type Tool = {
-  type: "function";
-  function: {
-    name: string;
-    description: string;
-    parameters: any;
-  };
+  name: string;
+  description: string;
+  inputSchema: unknown;
+  execute: (input: unknown) => Promise<string>;
 };
 
-export type ToolCall = {
-  index: number;
-  id: string;
-  type: "function";
-  function: {
-    name: string;
-    arguments: string;
-  };
-};
+export type ResponseChunk =
+  | {
+      type: "reasoning";
+      reasoning: string;
+    }
+  | {
+      type: "content";
+      content: string;
+    }
+  | {
+      type: "tool-call-start";
+      toolCallId: string;
+      toolName: string;
+    }
+  | {
+      type: "tool-call-delta";
+      toolCallId: string;
+      toolName: string;
+      argumentsDelta: string;
+    }
+  | {
+      type: "tool-result";
+      toolCallId: string;
+      toolName: string;
+      input: unknown;
+      output: unknown;
+    };
 
-export type PartialToolCall = {
-  index: number;
-  function: { arguments: string };
-};
+function getStreamText(part: {
+  text?: unknown;
+  textDelta?: unknown;
+  delta?: unknown;
+}) {
+  if (typeof part.text === "string" && part.text) {
+    return part.text;
+  }
 
-export type ResponseChunk = {
-  reasoning?: string;
-  content?: string;
-  toolCall?: ToolCall | PartialToolCall;
-};
+  if (typeof part.textDelta === "string" && part.textDelta) {
+    return part.textDelta;
+  }
 
-export async function streamResponse({
+  if (typeof part.delta === "string" && part.delta) {
+    return part.delta;
+  }
+
+  return null;
+}
+
+function normalizeOpenAIBaseURL(value: string) {
+  const trimmed = value.replace(/\/+$/, "");
+  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+}
+
+const openAIBase = process.env.OPENAI_API_BASE;
+const openAIKey = process.env.OPENAI_API_KEY;
+
+if (!openAIBase) {
+  throw new Error("Missing OPENAI_API_BASE environment variable.");
+}
+
+if (!openAIKey) {
+  throw new Error("Missing OPENAI_API_KEY environment variable.");
+}
+
+const shopifyGateway = createOpenAICompatible<string, never, never, never>({
+  name: "shopify-llm-gateway",
+  baseURL: normalizeOpenAIBaseURL(openAIBase),
+  apiKey: openAIKey,
+  includeUsage: true,
+});
+
+export function streamResponse({
+  model,
   messages,
   tools,
   abortSignal,
 }: {
+  model: string;
   messages: Message[];
   tools?: Tool[];
   abortSignal?: AbortSignal;
 }) {
-  const response = await fetch("http://localhost:8080/v1/chat/completions", {
-    method: "POST",
-    signal: abortSignal,
-    body: JSON.stringify({
-      stream: true,
-      messages,
-      tools,
-    }),
+  const result = streamText({
+    model: shopifyGateway.chatModel(model),
+    messages,
+    abortSignal,
+    tools: Object.fromEntries(
+      (tools ?? []).map((tool) => [
+        tool.name,
+        dynamicTool({
+          description: tool.description,
+          inputSchema: jsonSchema(tool.inputSchema as any),
+          execute: tool.execute,
+        }),
+      ])
+    ),
+    stopWhen: stepCountIs(10),
   });
 
-  if (!response.body) throw new Error("Invalid response");
+  return {
+    stream: (async function* (): AsyncGenerator<ResponseChunk> {
+      const activeToolNames = new Map<string, string>();
 
-  return response.body
-    .pipeThrough(new TextDecoderStream())
-    .pipeThrough(new EventStreamDecoder())
-    .pipeThrough(
-      new TransformStream<EventChunk, ResponseChunk>({
-        transform(chunk, controller) {
-          if (
-            chunk.type !== "event" ||
-            chunk.event !== "message" ||
-            !chunk.data ||
-            chunk.data === "[DONE]"
-          )
-            return;
-
-          const data = JSON.parse(chunk.data);
-          const { choices } = data;
-          const { delta } = choices[0];
-
-          controller.enqueue({
-            reasoning: delta.reasoning_content,
-            content: delta.content,
-            toolCall: delta.tool_calls?.[0],
-          });
-        },
-      }),
-    );
-}
-
-export class ResponseLogger extends TransformStream<
-  ResponseChunk,
-  ResponseChunk
-> {
-  constructor() {
-    let mode: "unknown" | "reasoning" | "content" | "tool" = "unknown";
-    const seenTools = new Set<string>();
-
-    super({
-      transform(chunk, controller) {
-        if (chunk.reasoning) {
-          if (mode === "unknown") {
-            console.log("<think>");
-            process.stdout.write("\x1b[90m");
-          }
-          mode = "reasoning";
-          process.stdout.write(chunk.reasoning);
-        } else if (chunk.content) {
-          if (mode !== "unknown" && mode !== "content")
-            process.stdout.write("\x1b[0m");
-          if (mode === "reasoning") console.log("\n</think>\n");
-          if (mode === "tool") console.log("\n</tool>\n");
-
-          mode = "content";
-          process.stdout.write(chunk.content);
-        } else if (chunk.toolCall) {
-          if ("id" in chunk.toolCall) {
-            if (mode === "tool") console.log("\n</tool>");
-            console.log(`\n<tool name=${chunk.toolCall.function.name}>`);
-          }
-          mode = "tool";
-          process.stdout.write(chunk.toolCall.function.arguments);
+      for await (const part of result.fullStream as AsyncIterable<any>) {
+        switch (part.type) {
+          case "error":
+            throw part.error instanceof Error ? part.error : new Error(String(part.error));
+          case "reasoning":
+          case "reasoning-delta":
+            {
+              const reasoning = getStreamText(part);
+              if (reasoning) {
+                yield {
+                  type: "reasoning",
+                  reasoning,
+                };
+              }
+            }
+            break;
+          case "text":
+          case "text-delta":
+            {
+              const content = getStreamText(part);
+              if (content) {
+                yield {
+                  type: "content",
+                  content,
+                };
+              }
+            }
+            break;
+          case "tool-input-start":
+            activeToolNames.set(part.id, part.toolName);
+            yield {
+              type: "tool-call-start",
+              toolCallId: part.id,
+              toolName: part.toolName,
+            };
+            break;
+          case "tool-input-delta":
+            {
+              const argumentsDelta = getStreamText(part);
+              if (argumentsDelta) {
+                yield {
+                  type: "tool-call-delta",
+                  toolCallId: part.id,
+                  toolName: activeToolNames.get(part.id) ?? "",
+                  argumentsDelta,
+                };
+              }
+            }
+            break;
+          case "tool-input-end":
+            activeToolNames.delete(part.id);
+            break;
+          case "tool-call-streaming-start":
+          case "tool-call":
+            activeToolNames.set(part.toolCallId, part.toolName);
+            yield {
+              type: "tool-call-start",
+              toolCallId: part.toolCallId,
+              toolName: part.toolName,
+            };
+            break;
+          case "tool-call-delta":
+            {
+              const argumentsDelta = getStreamText(part) ?? part.argsTextDelta;
+              if (typeof argumentsDelta === "string" && argumentsDelta) {
+                yield {
+                  type: "tool-call-delta",
+                  toolCallId: part.toolCallId,
+                  toolName: part.toolName,
+                  argumentsDelta,
+                };
+              }
+            }
+            break;
+          case "tool-result":
+            yield {
+              type: "tool-result",
+              toolCallId: part.toolCallId,
+              toolName: part.toolName,
+              input: part.input,
+              output: part.output,
+            };
+            break;
         }
-
-        controller.enqueue(chunk);
-      },
-      flush() {
-        if (mode === "tool") console.log("\n</tool>");
-        else console.log();
-      },
-    });
-  }
+      }
+    })(),
+    responseMessages: Promise.resolve(result.response).then((response: any) => response.messages as Message[]),
+  };
 }
