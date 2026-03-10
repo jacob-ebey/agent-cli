@@ -3,10 +3,10 @@ import * as path from "node:path";
 
 import {
   assertInteger,
+  getWorkspaceRoot,
   relativeWorkspacePath,
   resolveWorkspacePath,
   spawnCommand,
-  WORKSPACE_ROOT,
   type ToolHandler,
 } from "./runtime.ts";
 
@@ -35,7 +35,7 @@ async function statIfExists(targetPath: string) {
 }
 
 async function getAgentsIgnoreArgs() {
-  const agentsIgnorePath = path.join(WORKSPACE_ROOT, ".agentsignore");
+  const agentsIgnorePath = path.join(getWorkspaceRoot(), ".agentsignore");
   const stat = await statIfExists(agentsIgnorePath);
 
   if (!stat?.isFile()) {
@@ -66,7 +66,7 @@ async function listVisibleWorkspaceFiles(targetRelativePath: string, agentsIgnor
     rgArgs.push(targetRelativePath);
   }
 
-  const result = await spawnCommand("rg", rgArgs, WORKSPACE_ROOT);
+  const result = await spawnCommand("rg", rgArgs, getWorkspaceRoot());
   if (result.exitCode !== 0) {
     throw new Error(result.stderr.trim() || `rg exited with code ${result.exitCode}.`);
   }

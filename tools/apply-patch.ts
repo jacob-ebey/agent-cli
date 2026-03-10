@@ -6,6 +6,13 @@ import {
   resolveWorkspacePath,
   type ToolHandler,
 } from "./runtime.ts";
+import {
+  getUpmergePreview,
+  prepareWorkspaceForEdit,
+  relativeOriginalWorkspacePath,
+  resolveOriginalWorkspacePath,
+  trackEditTarget,
+} from "../worktree.ts";
 
 function countOccurrences(source: string, search: string) {
   if (!search.length) {
@@ -37,6 +44,18 @@ async function statIfExists(targetPath: string) {
   }
 }
 
+function truncateDiffForDisplay(diff: string, maxLines = 200) {
+  const lines = diff.split("\n");
+  if (lines.length <= maxLines) {
+    return diff;
+  }
+
+  return [
+    ...lines.slice(0, maxLines),
+    `... (${lines.length - maxLines} more lines omitted)`,
+  ].join("\n");
+}
+
 export const execute: ToolHandler = async (argumentsObject) => {
   const requestedPath = argumentsObject.path;
   if (typeof requestedPath !== "string" || !requestedPath.trim()) {
@@ -63,7 +82,11 @@ export const execute: ToolHandler = async (argumentsObject) => {
     throw new Error("create_if_missing must be a boolean when provided.");
   }
 
+  const session = await prepareWorkspaceForEdit();
+  const trackedEdit = await trackEditTarget(requestedPath);
   const resolvedPath = resolveWorkspacePath(requestedPath);
+  const originalPath = resolveOriginalWorkspacePath(requestedPath);
+  const originalRelativePath = relativeOriginalWorkspacePath(originalPath);
   const stat = await statIfExists(resolvedPath);
   const shouldReplaceAll = replaceAll === true;
 
@@ -80,7 +103,17 @@ export const execute: ToolHandler = async (argumentsObject) => {
 
     await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
     await fs.writeFile(resolvedPath, newString, "utf-8");
-    return `Created ${relativeWorkspacePath(resolvedPath)}.`;
+    if (session.mode !== "worktree") {
+      return `Created ${relativeWorkspacePath(resolvedPath)}.`;
+    }
+
+    const diff = truncateDiffForDisplay(await getUpmergePreview(trackedEdit.relativePath));
+    return [
+      `Created ${originalRelativePath} in the agent worktree.`,
+      "Press `u` in the UI to review and upmerge it back into the main workspace.",
+      "",
+      diff,
+    ].join("\n");
   }
 
   if (!stat.isFile()) {
@@ -114,8 +147,19 @@ export const execute: ToolHandler = async (argumentsObject) => {
 
   await fs.writeFile(resolvedPath, updated, "utf-8");
 
+  if (session.mode !== "worktree") {
+    return [
+      `Updated ${relativeWorkspacePath(resolvedPath)}.`,
+      `Replacements: ${shouldReplaceAll ? matchCount : 1}`,
+    ].join("\n");
+  }
+
+  const diff = truncateDiffForDisplay(await getUpmergePreview(trackedEdit.relativePath));
   return [
-    `Updated ${relativeWorkspacePath(resolvedPath)}.`,
+    `Updated ${originalRelativePath} in the agent worktree.`,
     `Replacements: ${shouldReplaceAll ? matchCount : 1}`,
+    "Press `u` in the UI to review and upmerge it back into the main workspace.",
+    "",
+    diff,
   ].join("\n");
 };

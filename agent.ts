@@ -18,6 +18,13 @@ import {
   type Tool,
   type ToolCall,
 } from "./lib/llm.ts";
+import {
+  cleanupWorkspaceSession,
+  getUpmergePreview,
+  getUpmergeStatus,
+  upmergeAll,
+  upmergeRelativePath,
+} from "./worktree.ts";
 
 const WORKSPACE_ROOT = process.cwd();
 const TOOLS_DIRECTORY = "tools";
@@ -36,31 +43,21 @@ type ChatEntry = {
 
 type ToolExecutor = (argumentsObject: Record<string, unknown>) => Promise<string>;
 
-type ToolMetadata = {
-  requiresApproval: boolean;
-};
-
 type LoadedTool = {
   definition: Tool;
   execute: ToolExecutor;
-  metadata: ToolMetadata;
 };
 
-type ParsedToolDefinition = {
-  definition: Tool;
-  metadata: ToolMetadata;
-};
-
-type PendingApproval = {
-  toolName: string;
-  resolve: (approved: boolean) => void;
+type UpmergeMenuItem = {
+  label: string;
+  path: string | null;
 };
 
 function normalizeWhitespace(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function parseToolDefinition(source: string): ParsedToolDefinition | null {
+function parseToolDefinition(source: string): Tool | null {
   const nameMatch = source.match(/^#\s*`?([a-zA-Z0-9_-]+)`?\s*$/m);
   const descriptionMatch = source.match(
     /##\s*Description\s*\n+([\s\S]*?)(?=\n##\s|\s*$)/
@@ -68,27 +65,17 @@ function parseToolDefinition(source: string): ParsedToolDefinition | null {
   const parametersMatch = source.match(
     /##\s*Parameters\s*\n+```json\s*\n([\s\S]*?)\n```/
   );
-  const metadataMatch = source.match(
-    /##\s*Metadata\s*\n+```json\s*\n([\s\S]*?)\n```/
-  );
 
   if (!nameMatch || !descriptionMatch || !parametersMatch) {
     return null;
   }
 
   return {
-    definition: {
-      type: "function",
-      function: {
-        name: nameMatch[1],
-        description: normalizeWhitespace(descriptionMatch[1]),
-        parameters: JSON.parse(parametersMatch[1]),
-      },
-    },
-    metadata: {
-      requiresApproval:
-        metadataMatch !== null &&
-        JSON.parse(metadataMatch[1]).requiresApproval === true,
+    type: "function",
+    function: {
+      name: nameMatch[1],
+      description: normalizeWhitespace(descriptionMatch[1]),
+      parameters: JSON.parse(parametersMatch[1]),
     },
   };
 }
@@ -106,9 +93,9 @@ async function loadTools() {
         }
 
         const expectedName = path.basename(file, ".md");
-        if (parsedDefinition.definition.function.name !== expectedName) {
+        if (parsedDefinition.function.name !== expectedName) {
           throw new Error(
-            `Tool definition name "${parsedDefinition.definition.function.name}" must match "${expectedName}.md".`
+            `Tool definition name "${parsedDefinition.function.name}" must match "${expectedName}.md".`
           );
         }
 
@@ -122,11 +109,10 @@ async function loadTools() {
         }
 
         return [
-          parsedDefinition.definition.function.name,
+          parsedDefinition.function.name,
           {
-            definition: parsedDefinition.definition,
+            definition: parsedDefinition,
             execute: toolModule.execute,
-            metadata: parsedDefinition.metadata,
           },
         ] as const;
       })
@@ -151,13 +137,6 @@ async function executeToolCall(toolCall: ToolCall, loadedTools: Map<string, Load
     const tool = loadedTools.get(toolCall.function.name);
     if (!tool) {
       throw new Error(`Unknown tool: ${toolCall.function.name}`);
-    }
-
-    if (tool.metadata.requiresApproval) {
-      const approved = await requestToolApproval(toolCall.function.name, parsedArguments);
-      if (!approved) {
-        throw new Error(`User denied approval for ${toolCall.function.name}.`);
-      }
     }
 
     content = await tool.execute(parsedArguments);
@@ -230,77 +209,12 @@ let mode: Mode = "normal";
 let insertDraft = "";
 let commandDraft = "";
 const entries: ChatEntry[] = [];
-let pendingApproval: PendingApproval | null = null;
-
-function formatApprovalArguments(argumentsObject: Record<string, unknown>) {
-  const pretty = JSON.stringify(argumentsObject, null, 2) ?? "{}";
-  const lines = pretty.split("\n");
-
-  if (lines.length <= 80) {
-    return pretty;
-  }
-
-  return [
-    ...lines.slice(0, 80),
-    `... (${lines.length - 80} more lines omitted)`,
-  ].join("\n");
-}
-
-function settlePendingApproval(approved: boolean) {
-  if (!pendingApproval) {
-    return;
-  }
-
-  const { toolName, resolve } = pendingApproval;
-  pendingApproval = null;
-  appendEntry(
-    "system",
-    approved
-      ? `Approved \`${toolName}\`.`
-      : `Denied \`${toolName}\`.`
-  );
-  updateComposerHint();
-  updateSidebar(
-    approved
-      ? `Approval granted: ${toolName}`
-      : `Approval denied: ${toolName}`
-  );
-  renderer.requestRender();
-  scrollToBottom();
-  resolve(approved);
-}
-
-async function requestToolApproval(
-  toolName: string,
-  argumentsObject: Record<string, unknown>
-) {
-  if (pendingApproval) {
-    throw new Error("Another approval is already pending.");
-  }
-
-  appendEntry(
-    "system",
-    [
-      `Approval required before running \`${toolName}\`.`,
-      "",
-      "Press `y` to approve or `n` / `Esc` to deny.",
-      "",
-      "Arguments:",
-      formatApprovalArguments(argumentsObject),
-    ].join("\n")
-  );
-  updateComposerHint();
-  updateSidebar(`Approval required: ${toolName} (y approve, n deny)`);
-  renderer.requestRender();
-  scrollToBottom();
-
-  return await new Promise<boolean>((resolve) => {
-    pendingApproval = {
-      toolName,
-      resolve,
-    };
-  });
-}
+let upmergeMode: "direct" | "worktree" = "direct";
+let upmergeNote = "A git worktree will be created on the first edit when available.";
+let upmergeItems: UpmergeMenuItem[] = [];
+let upmergeMenuOpen = false;
+let upmergeSelection = 0;
+let upmergePanelAttached = false;
 
 class ComposerTextarea extends TextareaRenderable {
   handleKeyPress(key: KeyEvent): boolean {
@@ -426,6 +340,40 @@ const sidebarText = new TextRenderable(renderer, {
 
 sidebar.add(sidebarText);
 
+const upmergePanel = new BoxRenderable(renderer, {
+  id: "upmerge-panel",
+  width: 72,
+  border: true,
+  borderStyle: "rounded",
+  borderColor: "#22c55e",
+  backgroundColor: "#052e2b",
+  title: "Upmerge Diff",
+  padding: 1,
+});
+
+const upmergePreview = new ScrollBoxRenderable(renderer, {
+  id: "upmerge-preview",
+  width: "100%",
+  height: "100%",
+  stickyScroll: false,
+  viewportOptions: {
+    backgroundColor: "#052e2b",
+  },
+  contentOptions: {
+    flexDirection: "column",
+    backgroundColor: "#052e2b",
+  },
+});
+
+const upmergePreviewText = new TextRenderable(renderer, {
+  id: "upmerge-preview-text",
+  content: "No pending upmerges.",
+  fg: "#dcfce7",
+});
+
+upmergePreview.add(upmergePreviewText);
+upmergePanel.add(upmergePreview);
+
 main.add(transcriptPanel);
 main.add(sidebar);
 
@@ -476,7 +424,122 @@ function moveComposerCursorToEnd(value: string) {
     value.length;
 }
 
+function currentUpmergeItems() {
+  if (!upmergeItems.length) {
+    return [];
+  }
+
+  return [{ label: "Upmerge all pending files", path: null }, ...upmergeItems];
+}
+
+function selectedUpmergeItem() {
+  const items = currentUpmergeItems();
+  if (!items.length) {
+    return null;
+  }
+
+  return items[Math.min(upmergeSelection, items.length - 1)] ?? null;
+}
+
+async function refreshUpmergePreview() {
+  if (!upmergeMenuOpen) {
+    return;
+  }
+
+  const selected = selectedUpmergeItem();
+  upmergePreviewText.content = await getUpmergePreview(selected?.path ?? undefined);
+  renderer.requestRender();
+}
+
+async function refreshUpmergeState() {
+  const status = await getUpmergeStatus();
+  upmergeMode = status.mode;
+  upmergeNote = status.note;
+  upmergeItems = status.pendingFiles.map((entry) => ({
+    label: entry,
+    path: entry,
+  }));
+
+  const items = currentUpmergeItems();
+  if (!items.length) {
+    upmergeSelection = 0;
+  } else if (upmergeSelection >= items.length) {
+    upmergeSelection = items.length - 1;
+  }
+
+  if (upmergeMenuOpen) {
+    await refreshUpmergePreview();
+  }
+
+  updateSidebar();
+  updateComposerHint();
+  renderer.requestRender();
+}
+
+function closeUpmergeMenu() {
+  if (!upmergeMenuOpen) {
+    return;
+  }
+
+  upmergeMenuOpen = false;
+  if (upmergePanelAttached) {
+    main.remove(upmergePanel.id);
+    upmergePanelAttached = false;
+  }
+  updateSidebar();
+  updateComposerHint();
+  renderer.requestRender();
+}
+
+async function openUpmergeMenu() {
+  upmergeMenuOpen = true;
+  if (!upmergePanelAttached) {
+    main.remove(sidebar.id);
+    main.add(upmergePanel);
+    main.add(sidebar);
+    upmergePanelAttached = true;
+  }
+  await refreshUpmergeState();
+}
+
+async function moveUpmergeSelection(delta: number) {
+  const items = currentUpmergeItems();
+  if (!items.length) {
+    return;
+  }
+
+  upmergeSelection = (upmergeSelection + delta + items.length) % items.length;
+  await refreshUpmergePreview();
+  updateSidebar();
+}
+
+async function runUpmergeSelection() {
+  const selected = selectedUpmergeItem();
+  if (!selected) {
+    updateSidebar("No pending upmerges.");
+    renderer.requestRender();
+    return;
+  }
+
+  try {
+    const message =
+      selected.path === null
+        ? await upmergeAll()
+        : await upmergeRelativePath(selected.path);
+    appendEntry("system", message);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    appendEntry("error", message);
+  }
+
+  await refreshUpmergeState();
+}
+
 function setMode(nextMode: Mode) {
+  if (nextMode !== "normal") {
+    closeUpmergeMenu();
+  }
+
   mode = nextMode;
 
   if (mode === "insert") {
@@ -506,7 +569,7 @@ function setMode(nextMode: Mode) {
   } else {
     composer.title = "-- NORMAL --";
     composer.borderColor = "#334155";
-    input.placeholder = "Press i to insert or : for commands";
+    input.placeholder = "Press i to insert, : for commands, or u for upmerge";
     setComposerText("");
     input.blur();
   }
@@ -524,15 +587,44 @@ function scrollToBottom() {
 }
 
 function updateSidebar(note = "Ready for your next prompt.") {
+  if (upmergeMenuOpen) {
+    const items = currentUpmergeItems();
+    sidebar.title = "Upmerge";
+    sidebar.borderColor = "#22c55e";
+    sidebarText.content = [
+      `Edits: ${upmergeMode}`,
+      `Pending: ${upmergeItems.length}`,
+      "",
+      items.length
+        ? items
+            .map((item, index) => `${index === upmergeSelection ? ">" : " "} ${item.label}`)
+            .join("\n")
+        : "No pending upmerges.",
+      "",
+      "Shortcuts",
+      "Enter  upmerge selected item",
+      "j / k  change selection",
+      "u/Esc  close menu",
+      "",
+      note,
+    ].join("\n");
+    return;
+  }
+
+  sidebar.title = "Session";
+  sidebar.borderColor = "#334155";
   sidebarText.content = [
     `Status: ${busy ? "streaming" : "idle"}`,
     `Mode: ${mode}`,
     `Messages: ${entries.length}`,
+    `Edits: ${upmergeMode}`,
+    `Upmerges: ${upmergeItems.length}`,
     "",
     "Shortcuts",
     "i      insert mode",
     ":      command mode",
     "j / k  scroll transcript",
+    "u      upmerge menu",
     "Esc    normal mode",
     "Ctrl+C quit",
     "",
@@ -543,13 +635,15 @@ function updateSidebar(note = "Ready for your next prompt.") {
     "Backend",
     BACKEND_URL,
     "",
+    upmergeNote,
+    "",
     note,
   ].join("\n");
 }
 
 function updateComposerHint() {
-  if (pendingApproval) {
-    composerHint.content = "Approval pending. Press y to approve or n/Esc to deny.";
+  if (upmergeMenuOpen) {
+    composerHint.content = "Upmerge menu open. Enter applies the selected diff, u/Esc closes it.";
     return;
   }
 
@@ -560,7 +654,7 @@ function updateComposerHint() {
 
   if (mode === "normal") {
     composerHint.content =
-      "Normal mode. Press i to compose, : for commands, or j/k to scroll.";
+      "Normal mode. Press i to compose, : for commands, u for upmerge, or j/k to scroll.";
     return;
   }
 
@@ -631,7 +725,15 @@ function resetConversation() {
   setMode("normal");
 }
 
-function executeCommand(raw: string) {
+async function shutdown() {
+  try {
+    await cleanupWorkspaceSession();
+  } finally {
+    renderer.destroy();
+  }
+}
+
+async function executeCommand(raw: string) {
   const command = raw.trim();
 
   if (!command) {
@@ -646,7 +748,7 @@ function executeCommand(raw: string) {
   }
 
   if (command === "quit" || command === "q") {
-    renderer.destroy();
+    await shutdown();
     return;
   }
 
@@ -659,7 +761,7 @@ async function submitPrompt() {
   if (busy) return;
 
   if (mode === "command") {
-    executeCommand(commandDraft);
+    await executeCommand(commandDraft);
     return;
   }
 
@@ -747,7 +849,13 @@ async function submitPrompt() {
 
       for (const toolCall of toolCalls) {
         updateSidebar(`Running tool: ${toolCall.function.name}`);
-        conversation.push(await executeToolCall(toolCall, loadedTools));
+        const toolResult = await executeToolCall(toolCall, loadedTools);
+        conversation.push(toolResult);
+        appendEntry(
+          "system",
+          [`Tool \`${toolCall.function.name}\` completed.`, "", toolResult.content].join("\n")
+        );
+        await refreshUpmergeState();
       }
     }
   } catch (error) {
@@ -769,19 +877,19 @@ function isColonKey(key: KeyEvent) {
 
 function handleGlobalKey(key: KeyEvent) {
   if (key.ctrl && key.name === "c") {
-    renderer.destroy();
+    void shutdown();
     return;
   }
 
-  if (pendingApproval) {
-    if (key.eventType === "repeat") {
-      return;
-    }
-
-    if (key.name === "y") {
-      settlePendingApproval(true);
-    } else if (key.name === "n" || key.name === "escape") {
-      settlePendingApproval(false);
+  if (upmergeMenuOpen) {
+    if (key.name === "escape" || key.name === "u") {
+      closeUpmergeMenu();
+    } else if (key.name === "j" || key.name === "down") {
+      void moveUpmergeSelection(1);
+    } else if (key.name === "k" || key.name === "up") {
+      void moveUpmergeSelection(-1);
+    } else if (key.name === "enter" || key.name === "return") {
+      void runUpmergeSelection();
     }
     return;
   }
@@ -805,6 +913,11 @@ function handleGlobalKey(key: KeyEvent) {
   if (!busy && isColonKey(key)) {
     commandDraft = "";
     setMode("command");
+    return;
+  }
+
+  if (key.name === "u") {
+    void openUpmergeMenu();
     return;
   }
 
@@ -837,6 +950,5 @@ input.onSubmit = () => {
   void submitPrompt();
 };
 
-updateComposerHint();
-updateSidebar();
 setMode("normal");
+void refreshUpmergeState();

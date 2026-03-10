@@ -1,12 +1,21 @@
 import { spawn } from "node:child_process";
 import * as path from "node:path";
 
-export const WORKSPACE_ROOT = process.cwd();
+import {
+  getActiveWorkspaceRoot,
+  getOriginalWorkspaceRoot,
+} from "../worktree.ts";
+
+export const WORKSPACE_ROOT = getOriginalWorkspaceRoot();
+
+export function getWorkspaceRoot() {
+  return getActiveWorkspaceRoot();
+}
 
 export type ToolHandler = (argumentsObject: Record<string, unknown>) => Promise<string>;
 
 export function isWorkspacePath(targetPath: string) {
-  const relative = path.relative(WORKSPACE_ROOT, targetPath);
+  const relative = path.relative(getWorkspaceRoot(), targetPath);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
@@ -15,7 +24,7 @@ export function resolveWorkspacePath(targetPath: string) {
     throw new Error("A path is required.");
   }
 
-  const resolved = path.resolve(WORKSPACE_ROOT, targetPath);
+  const resolved = path.resolve(getWorkspaceRoot(), targetPath);
   if (!isWorkspacePath(resolved)) {
     throw new Error("Paths must stay within the workspace.");
   }
@@ -24,7 +33,7 @@ export function resolveWorkspacePath(targetPath: string) {
 }
 
 export function relativeWorkspacePath(targetPath: string) {
-  const relative = path.relative(WORKSPACE_ROOT, targetPath);
+  const relative = path.relative(getWorkspaceRoot(), targetPath);
   return relative || ".";
 }
 

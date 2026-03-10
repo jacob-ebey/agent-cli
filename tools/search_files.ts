@@ -1,9 +1,9 @@
 import {
   assertInteger,
+  getWorkspaceRoot,
   relativeWorkspacePath,
   resolveWorkspacePath,
   spawnCommand,
-  WORKSPACE_ROOT,
   type ToolHandler,
 } from "./runtime.ts";
 
@@ -33,7 +33,7 @@ export const execute: ToolHandler = async (argumentsObject) => {
 
   rgArgs.push("--", pattern, relativeWorkspacePath(resolvedPath));
 
-  const result = await spawnCommand("rg", rgArgs, WORKSPACE_ROOT);
+  const result = await spawnCommand("rg", rgArgs, getWorkspaceRoot());
   if (result.exitCode === 1) {
     return [
       `Pattern: ${pattern}`,

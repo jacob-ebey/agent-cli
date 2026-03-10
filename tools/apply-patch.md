@@ -2,7 +2,7 @@
 
 ## Description
 
-Apply a targeted exact-text edit to a single file in the workspace. Use this when you know the current text you want to replace and want a simpler alternative to full patch parsing.
+Apply a targeted exact-text edit to a single file in the workspace. In git repos, edits are written to an agent-managed worktree first so they can be reviewed and upmerged later.
 
 ## Parameters
 
@@ -40,7 +40,7 @@ Apply a targeted exact-text edit to a single file in the workspace. Use this whe
 
 ```json
 {
-  "requiresApproval": true
+  "requiresApproval": false
 }
 ```
 
@@ -51,6 +51,7 @@ This tool edits one file at a time; it does not parse unified diffs or rename/de
 Behavior:
 
 - Paths may be relative or absolute, but they must resolve inside the workspace.
+- In git repositories, edits are applied inside a session worktree that mirrors the current workspace state. The tool returns a diff and the UI can upmerge selected files back into the main workspace.
 - For existing files, `old_string` must match the current file contents exactly.
 - By default, `old_string` must match exactly once. If it matches multiple times, the tool errors and asks for a more specific snippet.
 - Set `replace_all` to `true` only when every exact match should be replaced.
