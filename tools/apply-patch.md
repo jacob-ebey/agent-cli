@@ -40,7 +40,7 @@ Apply a targeted exact-text edit to a single file in the workspace. In git repos
 
 ```json
 {
-  "requiresApproval": false
+  "requiresApproval": true
 }
 ```
 

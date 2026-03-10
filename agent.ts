@@ -22,6 +22,8 @@ import {
   cleanupWorkspaceSession,
   getUpmergePreview,
   getUpmergeStatus,
+  relativeOriginalWorkspacePath,
+  resolveOriginalWorkspacePath,
   upmergeAll,
   upmergeRelativePath,
 } from "./worktree.ts";
@@ -43,14 +45,26 @@ type ChatEntry = {
 
 type ToolExecutor = (argumentsObject: Record<string, unknown>) => Promise<string>;
 
+type ToolMetadata = {
+  requiresApproval: boolean;
+};
+
 type LoadedTool = {
   definition: Tool;
   execute: ToolExecutor;
+  metadata: ToolMetadata;
 };
 
 type UpmergeMenuItem = {
   label: string;
   path: string | null;
+};
+
+type PendingApproval = {
+  toolName: string;
+  approvalKey: string;
+  displayPath: string;
+  resolve: (approved: boolean) => void;
 };
 
 function normalizeWhitespace(value: string) {
@@ -80,6 +94,23 @@ function parseToolDefinition(source: string): Tool | null {
   };
 }
 
+function parseToolMetadata(source: string): ToolMetadata {
+  const metadataMatch = source.match(/##\s*Metadata\s*\n+```json\s*\n([\s\S]*?)\n```/);
+  if (!metadataMatch) {
+    return {
+      requiresApproval: false,
+    };
+  }
+
+  const parsed = JSON.parse(metadataMatch[1]) as {
+    requiresApproval?: unknown;
+  };
+
+  return {
+    requiresApproval: parsed.requiresApproval === true,
+  };
+}
+
 async function loadTools() {
   const files = await fs.readdir(TOOLS_DIRECTORY);
   const loadedTools = await Promise.all(
@@ -88,6 +119,7 @@ async function loadTools() {
       .map(async (file) => {
         const source = await fs.readFile(path.join(TOOLS_DIRECTORY, file), "utf-8");
         const parsedDefinition = parseToolDefinition(source);
+        const metadata = parseToolMetadata(source);
         if (!parsedDefinition) {
           return null;
         }
@@ -113,6 +145,7 @@ async function loadTools() {
           {
             definition: parsedDefinition,
             execute: toolModule.execute,
+            metadata,
           },
         ] as const;
       })
@@ -139,6 +172,7 @@ async function executeToolCall(toolCall: ToolCall, loadedTools: Map<string, Load
       throw new Error(`Unknown tool: ${toolCall.function.name}`);
     }
 
+    await ensureToolApproval(toolCall, tool, parsedArguments);
     content = await tool.execute(parsedArguments);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -181,6 +215,58 @@ function collectToolCall(toolCalls: ToolCall[], chunk: NonNullable<ResponseChunk
   };
 }
 
+function getApprovalTarget(tool: LoadedTool, argumentsObject: Record<string, unknown>) {
+  if (!tool.metadata.requiresApproval) {
+    return null;
+  }
+
+  const requestedPath = argumentsObject.path;
+  if (typeof requestedPath !== "string" || !requestedPath.trim()) {
+    return null;
+  }
+
+  const originalPath = resolveOriginalWorkspacePath(requestedPath);
+  return {
+    approvalKey: originalPath,
+    displayPath: relativeOriginalWorkspacePath(originalPath),
+  };
+}
+
+async function ensureToolApproval(
+  toolCall: ToolCall,
+  tool: LoadedTool,
+  argumentsObject: Record<string, unknown>
+) {
+  const target = getApprovalTarget(tool, argumentsObject);
+  if (!target || approvedEditTargets.has(target.approvalKey)) {
+    return;
+  }
+
+  const approved = await new Promise<boolean>((resolve) => {
+    pendingApproval = {
+      toolName: toolCall.function.name,
+      approvalKey: target.approvalKey,
+      displayPath: target.displayPath,
+      resolve,
+    };
+    appendEntry(
+      "system",
+      [
+        `Approval required before \`${toolCall.function.name}\` can edit \`${target.displayPath}\`.`,
+        "",
+        "Press `y` to approve edits to this file for the rest of the session, or `n` to deny.",
+      ].join("\n")
+    );
+    updateSidebar(`Waiting for approval to edit ${target.displayPath}.`);
+    updateComposerHint();
+    renderer.requestRender();
+  });
+
+  if (!approved) {
+    throw new Error(`Edit not approved for ${target.displayPath}.`);
+  }
+}
+
 const [systemPrompt, loadedTools] = await Promise.all([
   fs.readFile(SYSTEM_PROMPT_PATH, "utf-8"),
   loadTools(),
@@ -216,6 +302,8 @@ let upmergeMenuOpen = false;
 let upmergeSelection = 0;
 let upmergePanelAttached = false;
 let activeStreamAbortController: AbortController | null = null;
+const approvedEditTargets = new Set<string>();
+let pendingApproval: PendingApproval | null = null;
 
 class ComposerTextarea extends TextareaRenderable {
   handleKeyPress(key: KeyEvent): boolean {
@@ -587,7 +675,47 @@ function scrollToBottom() {
   });
 }
 
+function settlePendingApproval(approved: boolean) {
+  const request = pendingApproval;
+  if (!request) {
+    return;
+  }
+
+  pendingApproval = null;
+  if (approved) {
+    approvedEditTargets.add(request.approvalKey);
+    appendEntry(
+      "system",
+      `Approved edits to \`${request.displayPath}\` for the rest of this session.`
+    );
+    updateSidebar(`Approved edits to ${request.displayPath}.`);
+  } else {
+    appendEntry("system", `Denied edits to \`${request.displayPath}\`.`);
+    updateSidebar(`Denied edits to ${request.displayPath}.`);
+  }
+  updateComposerHint();
+  renderer.requestRender();
+  request.resolve(approved);
+}
+
 function updateSidebar(note = "Ready for your next prompt.") {
+  if (pendingApproval) {
+    sidebar.title = "Approval";
+    sidebar.borderColor = "#f59e0b";
+    sidebarText.content = [
+      "Status: waiting",
+      `Tool: ${pendingApproval.toolName}`,
+      `File: ${pendingApproval.displayPath}`,
+      "",
+      "Shortcuts",
+      "y      approve for session",
+      "n/Esc  deny this edit",
+      "",
+      note,
+    ].join("\n");
+    return;
+  }
+
   if (upmergeMenuOpen) {
     const items = currentUpmergeItems();
     sidebar.title = "Upmerge";
@@ -643,6 +771,12 @@ function updateSidebar(note = "Ready for your next prompt.") {
 }
 
 function updateComposerHint() {
+  if (pendingApproval) {
+    composerHint.content =
+      "Approval required. Press y to allow this file for the session, or n to deny.";
+    return;
+  }
+
   if (upmergeMenuOpen) {
     composerHint.content = "Upmerge menu open. Enter applies the selected diff, u/Esc closes it.";
     return;
@@ -922,6 +1056,15 @@ function handleGlobalKey(key: KeyEvent) {
     } else {
       updateSidebar("No active stream to abort. Use :quit to exit.");
       renderer.requestRender();
+    }
+    return;
+  }
+
+  if (pendingApproval) {
+    if (key.name === "y") {
+      settlePendingApproval(true);
+    } else if (key.name === "n" || key.name === "escape") {
+      settlePendingApproval(false);
     }
     return;
   }
