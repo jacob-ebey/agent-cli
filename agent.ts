@@ -1,7 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -21,6 +20,74 @@ import {
   type ResponseChunk,
   type Tool,
 } from "./lib/llm.ts";
+import {
+  ACTIVE_CONVERSATION_PATH,
+  CONFIG_DIRECTORY,
+  CONFIG_PATH,
+  CONVERSATION_HISTORY_DIRECTORY,
+  CONVERSATION_WORKTREES_DIRECTORY,
+  GITIGNORE_PATH,
+  INITIAL_TOOL_SEEDS,
+  INPUT_HISTORY_LIMIT,
+  INPUT_HISTORY_PATH,
+  LAUNCH_ARGUMENTS,
+  MODEL_PRESETS,
+  PLAN_GITIGNORE_ENTRY,
+  PLAN_PATH,
+  PREVIOUS_CONVERSATION_PATH,
+  ROOT_AGENTS_PATH,
+  SHELL_APPROVALS_PATH,
+  SHELL_OUTPUT_CHAR_LIMIT,
+  SHOULD_RECALL_PREVIOUS_SESSION,
+  SYSTEM_PROMPT_PATH,
+  THINKING_FRAMES,
+  TOOLS_DIRECTORY,
+  WORKSPACE_ROOT,
+} from "./lib/agent/constants.ts";
+import type {
+  ApprovalDecision,
+  ApprovalPersistence,
+  ApprovalScope,
+  AutoScrollState,
+  ChatEntry,
+  ChatRole,
+  ConversationHistoryItem,
+  ConversationMessage,
+  DetailPanel,
+  HistoryMode,
+  InitialToolMessageSeed,
+  InputHistoryState,
+  LoadedTool,
+  Mode,
+  ModelMenuItem,
+  ModelPresetName,
+  PendingApproval,
+  PersistedConfig,
+  PersistedConversationState,
+  PersistedShellApprovals,
+  PersistedTranscriptEntry,
+  ShellExecutionResult,
+  ShellVisibility,
+  ToolDefinition,
+  ToolExecutor,
+  ToolMetadata,
+  UpmergeMenuItem,
+} from "./lib/agent/types.ts";
+import {
+  appendChunkWithLimit,
+  assistantMessageContainsToolCall,
+  buildConversationPreview,
+  extractAssistantText,
+  extractTextParts,
+  formatConversationTimestamp,
+  formatToolOutput,
+  isRecord,
+  lastAssistantResponseContainsToolCall,
+  matchOutputLabel,
+  normalizeWhitespace,
+  readIntegerArgument,
+  readStringArgument,
+} from "./lib/agent/utils.ts";
 import { indexSkills } from "./lib/skills-index.ts";
 import {
   captureWorkspaceSession,
@@ -38,197 +105,6 @@ import {
   type PersistedWorkspaceSession,
 } from "./worktree.ts";
 
-const WORKSPACE_ROOT = process.cwd();
-const TOOLS_DIRECTORY = "tools";
-const SYSTEM_PROMPT_PATH = path.join(TOOLS_DIRECTORY, "system-prompt.md");
-const ROOT_AGENTS_PATH = path.join(WORKSPACE_ROOT, "AGENTS.md");
-const MODEL_PRESETS = {
-  anthropic: "anthropic:claude-sonnet-4-6",
-  openai: "openai:gpt-5.4",
-  google: "google:gemini-3.1-pro-preview",
-  ollama: "ollama:qwen3:latest",
-} as const;
-const CONFIG_DIRECTORY =
-  process.platform === "win32"
-    ? path.join(
-        process.env.APPDATA ?? path.join(homedir(), "AppData", "Roaming"),
-        "agent-cli"
-      )
-    : path.join(
-        process.env.XDG_CONFIG_HOME ?? path.join(homedir(), ".config"),
-        "agent-cli"
-      );
-const CONFIG_PATH = path.join(CONFIG_DIRECTORY, "config.json");
-const WORKSPACE_STATE_DIRECTORY = path.join(
-  CONFIG_DIRECTORY,
-  "workspaces",
-  Buffer.from(WORKSPACE_ROOT).toString("base64url")
-);
-const ACTIVE_CONVERSATION_PATH = path.join(
-  WORKSPACE_STATE_DIRECTORY,
-  "active-conversation.json"
-);
-const PREVIOUS_CONVERSATION_PATH = path.join(
-  WORKSPACE_STATE_DIRECTORY,
-  "previous-conversation.json"
-);
-const CONVERSATION_HISTORY_DIRECTORY = path.join(
-  WORKSPACE_STATE_DIRECTORY,
-  "history"
-);
-const CONVERSATION_WORKTREES_DIRECTORY = path.join(
-  WORKSPACE_STATE_DIRECTORY,
-  "worktrees"
-);
-const SHELL_APPROVALS_PATH = path.join(WORKSPACE_ROOT, ".agents", "shell.json");
-const PLAN_PATH = path.join(WORKSPACE_ROOT, ".agents", "PLAN.md");
-const GITIGNORE_PATH = path.join(WORKSPACE_ROOT, ".gitignore");
-const PLAN_GITIGNORE_ENTRY = ".agents/PLAN.md";
-const INPUT_HISTORY_PATH = path.join(tmpdir(), "agent-cli-input-history.json");
-const INPUT_HISTORY_LIMIT = 100;
-const LAUNCH_ARGUMENTS = new Set(process.argv.slice(2));
-const SHOULD_RECALL_PREVIOUS_SESSION =
-  LAUNCH_ARGUMENTS.has("--recall") || LAUNCH_ARGUMENTS.has("--recal");
-
-type ChatRole = "assistant" | "user" | "system" | "error";
-type Mode = "normal" | "insert" | "command" | "shell" | "agent_shell";
-type ConversationMessage = Message & {
-  localOnly?: boolean;
-};
-
-type ChatEntry = {
-  id: string;
-  role: ChatRole;
-  container: BoxRenderable;
-  body: TextRenderable;
-};
-
-type ToolExecutor = (
-  argumentsObject: Record<string, unknown>
-) => Promise<string>;
-
-type ApprovalScope = "path" | "command";
-type ApprovalPersistence = "session" | "persisted";
-type ApprovalDecision = "deny" | "once" | "session" | "always";
-
-type ToolMetadata = {
-  requiresApproval: boolean;
-  approvalScope: ApprovalScope;
-  approvalPersistence: ApprovalPersistence;
-};
-
-type ToolDefinition = Pick<Tool, "name" | "description" | "inputSchema">;
-
-type LoadedTool = {
-  definition: ToolDefinition;
-  execute: ToolExecutor;
-  metadata: ToolMetadata;
-};
-
-type UpmergeMenuItem = {
-  label: string;
-  path: string | null;
-};
-
-type ModelMenuItem = {
-  id: string;
-  label: string;
-  description: string;
-  provider: "shopify" | "ollama";
-};
-
-type PendingApproval = {
-  toolName: string;
-  approvalKey: string;
-  displayLabel: string;
-  displayValue: string;
-  approvalPersistence: ApprovalPersistence;
-  resolve: (decision: ApprovalDecision) => void;
-};
-
-type AutoScrollState = "follow" | "paused";
-
-type ModelPresetName = keyof typeof MODEL_PRESETS;
-type PersistedConfig = {
-  currentModel?: string;
-};
-
-type PersistedShellApprovals = {
-  version?: 1;
-  approvedCommands?: string[];
-  startupCommands?: string[];
-};
-
-type InputHistoryState = {
-  version: 1;
-  insert: string[];
-  command: string[];
-  shell: string[];
-  agent_shell: string[];
-};
-
-type HistoryMode = Exclude<Mode, "normal">;
-
-type ShellVisibility = "local" | "agent";
-type DetailPanel = "upmerge" | "history" | "model" | null;
-
-type ShellExecutionResult = {
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-  signal: NodeJS.Signals | null;
-  startupError: string | null;
-  stdoutTruncated: boolean;
-  stderrTruncated: boolean;
-};
-
-type PersistedTranscriptEntry = {
-  role: ChatRole;
-  content: string;
-};
-
-type PersistedConversationState = {
-  version: 1;
-  id: string;
-  title: string;
-  createdAt: string;
-  updatedAt: string;
-  workspaceSession: PersistedWorkspaceSession | null;
-  conversation: ConversationMessage[];
-  transcript: PersistedTranscriptEntry[];
-};
-
-type ConversationHistoryItem = PersistedConversationState & {
-  filePath: string;
-};
-
-const SHELL_OUTPUT_CHAR_LIMIT = 64_000;
-
-function normalizeWhitespace(value: string) {
-  return value.replace(/\s+/g, " ").trim();
-}
-
-function appendChunkWithLimit(current: string, chunk: string) {
-  if (current.length >= SHELL_OUTPUT_CHAR_LIMIT) {
-    return {
-      value: current,
-      truncated: true,
-    };
-  }
-
-  const remaining = SHELL_OUTPUT_CHAR_LIMIT - current.length;
-  if (chunk.length <= remaining) {
-    return {
-      value: current + chunk,
-      truncated: false,
-    };
-  }
-
-  return {
-    value: current + chunk.slice(0, remaining),
-    truncated: true,
-  };
-}
 
 function parsePersistedModel(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -533,23 +409,6 @@ async function resolveInitialConversationState() {
   return createInitialConversationState();
 }
 
-function formatConversationTimestamp(value: string) {
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
-}
-
-function buildConversationPreview(transcriptEntries: PersistedTranscriptEntry[]) {
-  if (!transcriptEntries.length) {
-    return "This conversation has no visible transcript.";
-  }
-
-  return transcriptEntries
-    .map((entry) => {
-      const heading = entry.role[0].toUpperCase() + entry.role.slice(1);
-      return `${heading}\n${entry.content}`;
-    })
-    .join("\n\n");
-}
 
 function isMeaningfulConversationState(
   state: PersistedConversationState | null
@@ -890,12 +749,6 @@ async function loadTools() {
   );
 }
 
-type InitialToolMessageSeed = {
-  toolCallId: string;
-  toolName: string;
-  input: Record<string, unknown>;
-};
-
 function createInitialToolResultOutput(output: string) {
   return {
     type: "text" as const,
@@ -904,22 +757,7 @@ function createInitialToolResultOutput(output: string) {
 }
 
 async function loadInitialToolMessages(loadedTools: Map<string, LoadedTool>) {
-  const seeds: InitialToolMessageSeed[] = [
-    {
-      toolCallId: "initial-list-project-tree",
-      toolName: "list_project_tree",
-      input: {
-        max_depth: 3,
-      },
-    },
-    {
-      toolCallId: "initial-read-file-package-json",
-      toolName: "read_file",
-      input: {
-        path: "package.json",
-      },
-    },
-  ];
+  const seeds: InitialToolMessageSeed[] = INITIAL_TOOL_SEEDS;
   const seededResults = await Promise.all(
     seeds.map(async (seed) => {
       const tool = loadedTools.get(seed.toolName);
@@ -968,47 +806,6 @@ async function loadInitialToolMessages(loadedTools: Map<string, LoadedTool>) {
   ] satisfies ConversationMessage[];
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function formatToolOutput(value: unknown) {
-  if (typeof value === "string") {
-    return value;
-  }
-
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function readStringArgument(
-  argumentsObject: Record<string, unknown>,
-  key: string
-) {
-  const value = argumentsObject[key];
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function readIntegerArgument(
-  argumentsObject: Record<string, unknown>,
-  key: string
-) {
-  const value = argumentsObject[key];
-  return typeof value === "number" && Number.isInteger(value) ? value : null;
-}
-
-function matchOutputLabel(output: unknown, label: string) {
-  if (typeof output !== "string") {
-    return null;
-  }
-
-  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = output.match(new RegExp(`^${escapedLabel}:\\s+(.+)$`, "m"));
-  return match?.[1]?.trim() ?? null;
-}
 
 function summarizeToolResult(
   toolName: string,
@@ -1094,78 +891,6 @@ function summarizeToolResult(
   }
 }
 
-function extractTextParts(content: unknown): string[] {
-  if (typeof content === "string") {
-    return content.trim() ? [content] : [];
-  }
-
-  if (!Array.isArray(content)) {
-    return [];
-  }
-
-  return content.flatMap((part) => {
-    if (typeof part !== "object" || part === null) {
-      return [];
-    }
-
-    const candidate = part as {
-      type?: unknown;
-      text?: unknown;
-    };
-
-    if (
-      candidate.type === "text" &&
-      typeof candidate.text === "string" &&
-      candidate.text.trim()
-    ) {
-      return [candidate.text];
-    }
-
-    return [];
-  });
-}
-
-function extractAssistantText(messages: Message[]) {
-  return messages
-    .flatMap((message) => {
-      if (message.role !== "assistant") {
-        return [];
-      }
-
-      return extractTextParts((message as { content?: unknown }).content);
-    })
-    .join("");
-}
-
-function assistantMessageContainsToolCall(message: Message) {
-  if (message.role !== "assistant") {
-    return false;
-  }
-
-  const content = (message as { content?: unknown }).content;
-  if (!Array.isArray(content)) {
-    return false;
-  }
-
-  return content.some((part) => {
-    if (typeof part !== "object" || part === null) {
-      return false;
-    }
-
-    return (part as { type?: unknown }).type === "tool-call";
-  });
-}
-
-function lastAssistantResponseContainsToolCall(messages: Message[]) {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message.role === "assistant") {
-      return assistantMessageContainsToolCall(message);
-    }
-  }
-
-  return false;
-}
 
 async function getApprovalTarget(
   toolName: string,
@@ -1351,7 +1076,6 @@ let activeShellProcess: ChildProcess | null = null;
 let activeThinkingIndicator: NodeJS.Timeout | null = null;
 let thinkingFrameIndex = 0;
 let latestSidebarNote = "Ready for your next prompt.";
-const THINKING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const approvedEditTargets = new Set<string>();
 let activeApproval: PendingApproval | null = null;
 const queuedApprovals: PendingApproval[] = [];
