@@ -350,12 +350,6 @@ async function runStartupCommands(worktreeWorkspaceRoot: string) {
   }
 }
 
-async function createBlankPlanFile(worktreeWorkspaceRoot: string) {
-  const planPath = path.join(worktreeWorkspaceRoot, ".agents", "PLAN.md");
-  await fs.mkdir(path.dirname(planPath), { recursive: true });
-  await fs.writeFile(planPath, "", "utf-8");
-}
-
 async function createWorktreeSession(gitRoot: string) {
   const sessionRoot = sessionStorageRoot
     ? sessionStorageRoot
@@ -385,7 +379,6 @@ async function createWorktreeSession(gitRoot: string) {
 
   await fs.mkdir(baselinesRoot, { recursive: true });
   await syncWorkspaceChangesIntoWorktree(worktreeWorkspaceRoot);
-  await createBlankPlanFile(worktreeWorkspaceRoot);
   await runStartupCommands(worktreeWorkspaceRoot);
 
   sessionState = {

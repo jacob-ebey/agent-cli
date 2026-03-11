@@ -83,7 +83,6 @@ test("agent entrypoint imports its local modules and keeps the quit command wire
   const source = await fs.readFile(path.join(repoRoot, "agent.ts"), "utf8");
 
   expect(source).toMatch(/import \{ createCliRenderer, type KeyEvent \} from "@opentui\/core";/);
-  expect(source).toMatch(/await ensurePlanFileReady\(\)/);
   expect(source).toMatch(/command === "quit" \|\| command === "q"/);
   expect(source).toMatch(/async function shutdown\(\)/);
   expect(source).toMatch(/await persistActiveConversation\(\)/);

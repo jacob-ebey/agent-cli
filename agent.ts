@@ -54,7 +54,6 @@ import {
   readStringArgument,
 } from "./lib/agent/utils.ts";
 import {
-  ensurePlanFileReady,
   loadInitialSystemMessage,
   loadPersistedConfig,
   loadPersistedShellApprovals,
@@ -183,8 +182,6 @@ function createInitialConversationMessages(): ConversationMessage[] {
   ];
 }
 
-
-await ensurePlanFileReady();
 
 const [initialSystemMessage, loadedTools] = await Promise.all([
   loadInitialSystemMessage(),

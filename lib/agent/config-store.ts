@@ -4,7 +4,6 @@ import * as path from "node:path";
 import {
   CONFIG_DIRECTORY,
   CONFIG_PATH,
-  PLAN_PATH,
   ROOT_AGENTS_PATH,
   SHELL_APPROVALS_PATH,
   SYSTEM_PROMPT_PATH,
@@ -113,20 +112,6 @@ export async function savePersistedShellApprovals(approvedCommands: Set<string>)
     `${JSON.stringify(payload, null, 2)}\n`,
     "utf-8"
   );
-}
-
-export async function ensurePlanFileReady() {
-  await fs.mkdir(path.dirname(PLAN_PATH), { recursive: true });
-
-  try {
-    await fs.access(PLAN_PATH);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw error;
-    }
-
-    await fs.writeFile(PLAN_PATH, "", "utf-8");
-  }
 }
 
 export async function loadRootAgentsGuidance() {
