@@ -205,7 +205,7 @@ export function createComposerHintContent(state: SidebarPresentationState) {
   }
 
   if (state.busy) {
-    return state.activeShellProcess
+    return state.activeShellSession
       ? state.autoScrollState === "paused"
         ? "A shell command is running. Auto-scroll is paused while you audit earlier output. Press G to jump back to the live bottom, or Ctrl+C to stop it."
         : "A shell command is running. Press Ctrl+C to stop it, or use j and k to inspect earlier messages."

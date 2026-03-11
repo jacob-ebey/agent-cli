@@ -1,7 +1,80 @@
 import { spawn, type ChildProcess } from "node:child_process";
 
-import type { ShellExecutionResult } from "./types.ts";
+import type { ActiveShellSession, ShellExecutionResult } from "./types.ts";
 import { appendChunkWithLimit } from "./utils.ts";
+
+function abortChildProcessTree(child: ChildProcess) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+
+  if (process.platform === "win32") {
+    try {
+      const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      killer.unref();
+    } catch {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // Ignore secondary abort errors.
+      }
+    }
+    return;
+  }
+
+  const processGroupId = child.pid ? -child.pid : null;
+  if (processGroupId !== null) {
+    try {
+      process.kill(processGroupId, "SIGINT");
+    } catch {
+      try {
+        child.kill("SIGINT");
+      } catch {
+        // Ignore secondary abort errors.
+      }
+    }
+
+    setTimeout(() => {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        return;
+      }
+      try {
+        process.kill(processGroupId, "SIGTERM");
+      } catch {
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // Ignore secondary abort errors.
+        }
+      }
+    }, 250).unref();
+
+    setTimeout(() => {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        return;
+      }
+      try {
+        process.kill(processGroupId, "SIGKILL");
+      } catch {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Ignore secondary abort errors.
+        }
+      }
+    }, 1_500).unref();
+    return;
+  }
+
+  try {
+    child.kill("SIGINT");
+  } catch {
+    // Ignore secondary abort errors.
+  }
+}
 
 export async function runShellCommandSession(options: {
   command: string;
@@ -14,7 +87,7 @@ export async function runShellCommandSession(options: {
     result: ShellExecutionResult;
     running: boolean;
   }) => void;
-  onProcessStart?: (child: ChildProcess) => void;
+  onProcessStart?: (session: ActiveShellSession) => void;
   onProcessEnd?: () => void;
 }): Promise<ShellExecutionResult> {
   const shell =
@@ -50,6 +123,7 @@ export async function runShellCommandSession(options: {
         cwd,
         stdio: ["ignore", "pipe", "pipe"],
         env: process.env,
+        detached: process.platform !== "win32",
       });
     } catch (error) {
       resolve({
@@ -64,7 +138,10 @@ export async function runShellCommandSession(options: {
       return;
     }
 
-    options.onProcessStart?.(child);
+    options.onProcessStart?.({
+      process: child,
+      abort: () => abortChildProcessTree(child),
+    });
 
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {

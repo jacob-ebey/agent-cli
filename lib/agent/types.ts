@@ -1,3 +1,5 @@
+import type { ChildProcess } from "node:child_process";
+
 import type { BoxRenderable, TextRenderable } from "@opentui/core";
 
 import type { Message, Tool } from "../llm.ts";
@@ -107,6 +109,11 @@ export type ShellExecutionResult = {
   stderrTruncated: boolean;
 };
 
+export type ActiveShellSession = {
+  process: ChildProcess;
+  abort: () => void;
+};
+
 export type PersistedTranscriptEntry = {
   role: ChatRole;
   content: string;
@@ -193,6 +200,6 @@ export type SidebarPresentationState = {
   tokenWindowLabel: string;
   upmergeCount: number;
   autoScrollState: AutoScrollState;
-  activeShellProcess: boolean;
+  activeShellSession: boolean;
   insertDraft: string;
 };

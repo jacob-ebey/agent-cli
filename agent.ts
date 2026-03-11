@@ -1,4 +1,3 @@
-import type { ChildProcess } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
@@ -32,6 +31,7 @@ import type {
   InputHistoryState,
   LoadedTool,
   Mode,
+  ActiveShellSession,
   ModelMenuItem,
   ModelPresetName,
   PendingApproval,
@@ -290,7 +290,7 @@ let modelFilter = "";
 let modelMenuErrors: string[] = [];
 let detailPanelAttached: DetailPanel = null;
 let activeStreamAbortController: AbortController | null = null;
-let activeShellProcess: ChildProcess | null = null;
+let activeShellSession: ActiveShellSession | null = null;
 let activeThinkingIndicator: NodeJS.Timeout | null = null;
 let thinkingFrameIndex = 0;
 let latestSidebarNote = "Ready for your next prompt.";
@@ -1059,7 +1059,7 @@ function buildSidebarPresentationState(): SidebarPresentationState {
     tokenWindowLabel: formatTokenWindowLabel(),
     upmergeCount: upmergeItems.filter((item) => item.kind === "pending").length,
     autoScrollState,
-    activeShellProcess: activeShellProcess !== null,
+    activeShellSession: activeShellSession !== null,
     insertDraft,
   };
 }
@@ -1458,11 +1458,11 @@ async function executeShellInput(raw: string, visibility: ShellVisibility) {
     shellResult = await runShellCommandSession({
       command,
       cwd: getActiveWorkspaceAbsolutePath(),
-      onProcessStart: (child) => {
-        activeShellProcess = child;
+      onProcessStart: (session) => {
+        activeShellSession = session;
       },
       onProcessEnd: () => {
-        activeShellProcess = null;
+        activeShellSession = null;
       },
       onUpdate: (state) => {
         shellResult = state.result;
@@ -1480,7 +1480,7 @@ async function executeShellInput(raw: string, visibility: ShellVisibility) {
     }
     await persistActiveConversation();
   } finally {
-    activeShellProcess = null;
+    activeShellSession = null;
     setBusy(false);
     updateComposerHint();
     updateSidebar(
@@ -1686,9 +1686,9 @@ function handleGlobalKey(key: KeyEvent) {
       updateSidebar("Aborting current stream...");
       activeStreamAbortController.abort();
       renderer.requestRender();
-    } else if (activeShellProcess) {
+    } else if (activeShellSession) {
       updateSidebar("Stopping current shell command...");
-      activeShellProcess.kill("SIGINT");
+      activeShellSession.abort();
       renderer.requestRender();
     } else {
       updateSidebar("No active stream or shell command to abort. Use :quit to exit.");
