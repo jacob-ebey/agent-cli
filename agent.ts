@@ -237,6 +237,9 @@ restoreWorkspaceSession(initialConversationState.workspaceSession);
 
 let nextIdCounter = 0;
 let busy = false;
+let latestTotalTokensUsed: number | null = null;
+
+const DEFAULT_TOKEN_WINDOW = 272_000;
 let mode: Mode = "normal";
 let insertDraft = "";
 let commandDraft = "";
@@ -975,6 +978,19 @@ async function settlePendingApproval(decision: ApprovalDecision) {
   });
 }
 
+function formatTokenWindowLabel() {
+  const used = Math.max(0, Math.round(latestTotalTokensUsed ?? 0));
+  if (DEFAULT_TOKEN_WINDOW <= 0) {
+    return "0% used";
+  }
+
+  const percentUsed = Math.min(
+    100,
+    Math.max(0, Math.round((used / DEFAULT_TOKEN_WINDOW) * 100))
+  );
+  return `${percentUsed}% used`;
+}
+
 function buildSidebarPresentationState(): SidebarPresentationState {
   return {
     activeApproval,
@@ -994,6 +1010,8 @@ function buildSidebarPresentationState(): SidebarPresentationState {
     mode,
     currentModel,
     entriesCount: entries.length,
+    tokenUsageLabel: `${Math.max(0, Math.round(latestTotalTokensUsed ?? 0))}`,
+    tokenWindowLabel: formatTokenWindowLabel(),
     upmergeCount: upmergeItems.filter((item) => item.kind === "pending").length,
     autoScrollState,
     activeShellProcess: activeShellProcess !== null,
@@ -1105,6 +1123,7 @@ function restoreTranscriptFromHistory() {
 function replaceConversationState(state: PersistedConversationState) {
   activeConversationId = state.id;
   activeConversationCreatedAt = state.createdAt;
+  latestTotalTokensUsed = null;
   configureConversationWorkspace(state.id);
   restoreWorkspaceSession(state.workspaceSession);
   conversation.splice(0, conversation.length, ...structuredClone(state.conversation));
@@ -1447,11 +1466,13 @@ async function runAgentLoop() {
             refreshUpmergeState,
           }),
         onResponseMessages: async (responseMessages, state) => {
+          latestTotalTokensUsed = state.totalTokensUsed;
           applyFinalAssistantTextIfNeeded({
             state,
             responseMessages,
             appendEntry: (role, content) => appendEntry(role, content),
           });
+          updateSidebar();
           await persistActiveConversation();
           return shouldContinueAfterResponse(state, responseMessages, (role, content) =>
             appendEntry(role, content)

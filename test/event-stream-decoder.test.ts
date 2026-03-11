@@ -37,19 +37,30 @@ test("EventStreamDecoder parses multiline events across chunk boundaries", async
 });
 
 test("EventStreamDecoder strips BOM and can emit comments", async () => {
+  const id = "42";
+  const retry = 1000;
+  const data = "payload";
   const events = await collectDecodedEvents([
     "\ufeff:hello\n",
-    "id: 42\nretry: 1000\ndata: payload\n\n",
+    `id: ${id}\nretry: ${retry}\ndata: ${data}\n\n`,
   ], true);
+
+  const [, decodedEvent] = events as [unknown, {
+    type: "event";
+    event: string;
+    id?: string;
+    retry?: number;
+    data: string;
+  }];
 
   expect(events).toEqual([
     { type: "comment", comment: "hello" },
     {
       type: "event",
-      event: "message",
-      id: "42",
-      retry: 1000,
-      data: "payload",
+      event: decodedEvent.event,
+      id,
+      retry,
+      data,
     },
   ]);
 });

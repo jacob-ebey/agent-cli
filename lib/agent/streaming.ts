@@ -19,6 +19,7 @@ export function createAssistantStreamState(): AssistantStreamState {
     transcriptIndex: null,
     sawOutput: false,
     sawToolActivity: false,
+    totalTokensUsed: null,
   };
 }
 
@@ -131,6 +132,9 @@ export async function handleResponseChunk({
       );
       await refreshUpmergeState();
       updateSidebar(`Tool completed: ${chunk.toolName}`);
+      break;
+    case "finish":
+      state.totalTokensUsed = chunk.totalUsage.totalTokens ?? null;
       break;
   }
 }

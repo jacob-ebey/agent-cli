@@ -157,6 +157,7 @@ export type AssistantStreamState = {
   transcriptIndex: number | null;
   sawOutput: boolean;
   sawToolActivity: boolean;
+  totalTokensUsed: number | null;
 };
 
 export type SidebarViewModel = {
@@ -183,6 +184,8 @@ export type SidebarPresentationState = {
   mode: Mode;
   currentModel: string;
   entriesCount: number;
+  tokenUsageLabel: string;
+  tokenWindowLabel: string;
   upmergeCount: number;
   autoScrollState: AutoScrollState;
   activeShellProcess: boolean;

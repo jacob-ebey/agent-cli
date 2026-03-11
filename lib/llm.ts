@@ -19,6 +19,12 @@ export type Tool = {
   execute: (input: unknown) => Promise<string>;
 };
 
+export type TokenUsage = {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+};
+
 export type ResponseChunk =
   | {
       type: "reasoning";
@@ -45,6 +51,10 @@ export type ResponseChunk =
       toolName: string;
       input: unknown;
       output: unknown;
+    }
+  | {
+      type: "finish";
+      totalUsage: TokenUsage;
     };
 
 function getStreamText(part: {
@@ -474,6 +484,16 @@ export function streamResponse({
                   toolName: part.toolName,
                   input: part.input,
                   output: part.output,
+                };
+                break;
+              case "finish":
+                yield {
+                  type: "finish",
+                  totalUsage: {
+                    inputTokens: part.totalUsage?.inputTokens,
+                    outputTokens: part.totalUsage?.outputTokens,
+                    totalTokens: part.totalUsage?.totalTokens,
+                  },
                 };
                 break;
             }

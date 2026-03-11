@@ -9,10 +9,12 @@
 
 ## Standard Commands
 
-- Install dependencies: `pnpm install`
-- Start the app: `pnpm start`
-- Typecheck: `pnpm typecheck`
-- There are no declared build, lint, or test scripts beyond `typecheck` in `package.json`.
+- Prefer running project commands through Bun, using the `bun <command>` form whenever possible.
+- Install dependencies: `bun install`
+- Start the app: `bun run agent.ts`
+- Typecheck: `bun typecheck`
+- Tests: `bun test`
+- There are no declared build or lint scripts in `package.json`; the primary scripted validation command is `bun typecheck`.
 
 ## Repo Map
 
@@ -109,7 +111,7 @@
 
 ## Validation
 
-- After code changes, run: `pnpm exec tsc --noEmit`
+- After code changes, prefer Bun-based commands and run: `bun typecheck`
 - After tool changes, verify both sides of the contract still line up:
   - `tools/<name>.md` name matches filename
   - `tools/<name>.ts` exports `execute`
@@ -125,7 +127,7 @@
   - The default note says a git worktree will be created on first edit when available.
   - Code should not assume direct writes or worktree isolation is always active.
 - Startup commands may run inside the worktree session.
-  - `.agents/shell.json` currently includes `startupCommands: ["pnpm i"]`.
+  - Prefer Bun-style startup commands as well; for example, use `bun install` rather than pnpm-based equivalents.
 - Always-approved shell commands are matched by exact command string.
   - Small text changes can bypass prior approvals.
 - Skill indexing depends on embeddings and the generated `.agents/skills-index.json`; if embeddings are unavailable, `:index`/skill search flows may fail or be stale.
