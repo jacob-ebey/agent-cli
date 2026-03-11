@@ -12,6 +12,12 @@ type BaselineRecord = {
   exists: boolean;
 };
 
+const UPMERGE_IGNORED_PATHS = new Set([".agents/PLAN.md"]);
+
+function shouldIgnoreUpmergePath(relativePath: string) {
+  return UPMERGE_IGNORED_PATHS.has(toPortablePath(relativePath));
+}
+
 type SessionState =
   | {
       initialized: false;
@@ -634,6 +640,10 @@ export async function getUpmergeStatus(): Promise<UpmergeStatus> {
   if (sessionState.mode === "worktree") {
     const pendingFiles: string[] = [];
     for (const relativePath of sessionState.trackedFiles.keys()) {
+      if (shouldIgnoreUpmergePath(relativePath)) {
+        continue;
+      }
+
       if (await hasPendingDiff(relativePath)) {
         pendingFiles.push(relativePath);
       }
