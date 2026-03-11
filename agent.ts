@@ -663,8 +663,6 @@ async function runUpmergeSelection(
     | "auto-resolve"
 ) {
   const selectedItem = currentUpmergeItems(upmergeItems)[upmergeSelection] ?? null;
-  const shouldCloseAfterSuccess =
-    action === "upmerge" && selectedItem?.path === null;
 
   try {
     if (action === "auto-resolve") {
@@ -710,10 +708,6 @@ async function runUpmergeSelection(
       appendSystemMessage(result.message);
     }
     await refreshUpmergeState();
-
-    if (shouldCloseAfterSuccess) {
-      closeUpmergeMenu();
-    }
     return;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
