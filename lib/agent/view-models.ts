@@ -141,7 +141,7 @@ function createSessionSidebarViewModel(
     title: "Session",
     borderColor: "#334155",
     content: [
-      `Status: ${state.busy ? "streaming" : "idle"}`,
+      `Status: ${state.streamPhase}`,
       `Mode: ${state.mode}`,
       `Model: ${state.currentModel}`,
       `Messages: ${state.entriesCount}`,

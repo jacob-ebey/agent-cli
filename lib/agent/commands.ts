@@ -303,6 +303,7 @@ export async function summarizeConversationCommand(options: {
   setBusy: (busy: boolean) => void;
   setModeNormal: () => void;
   startThinkingIndicator: (note: string) => void;
+  sendStreamStateEvent: (event: "start-connection" | "connection-established" | "receive-reasoning" | "receive-content" | "await-approval" | "approval-resolved" | "complete" | "reset") => void;
   updateSidebar: (note: string) => void;
   appendSystemMessage: (content: string) => void;
   appendEntry: (role: "error", content: string) => void;
@@ -334,8 +335,10 @@ export async function summarizeConversationCommand(options: {
 
   options.setCommandDraft("");
   options.setBusy(true);
+  options.sendStreamStateEvent("start-connection");
   options.setModeNormal();
   options.startThinkingIndicator(`Summarizing conversation with ${options.currentModel}...`);
+  options.sendStreamStateEvent("connection-established");
   options.updateSidebar(`Summarizing conversation with ${options.currentModel}...`);
 
   try {

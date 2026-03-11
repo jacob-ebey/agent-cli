@@ -166,6 +166,8 @@ export type SidebarViewModel = {
   content: string;
 };
 
+export type StreamPhase = "idle" | "connecting" | "reasoning" | "responding" | "waiting";
+
 export type SidebarPresentationState = {
   activeApproval: PendingApproval | null;
   queuedApprovalsCount: number;
@@ -179,6 +181,7 @@ export type SidebarPresentationState = {
   historySelection: number;
   modelMenuOpen: boolean;
   busy: boolean;
+  streamPhase: StreamPhase;
   activeThinking: boolean;
   thinkingFrame: string;
   mode: Mode;

@@ -6,6 +6,7 @@ import type {
   ConversationMessage,
   PersistedTranscriptEntry,
 } from "./types.ts";
+import type { StreamStateMachineEvent } from "./stream-state.ts";
 import {
   extractAssistantText,
   formatToolOutput,
@@ -85,6 +86,7 @@ export async function handleResponseChunk({
   activeThinking,
   stopThinkingIndicator,
   updateSidebar,
+  sendStreamStateEvent,
   appendAssistantContent,
   appendSystemMessage,
   summarizeToolResult,
@@ -96,6 +98,7 @@ export async function handleResponseChunk({
   activeThinking: boolean;
   stopThinkingIndicator: () => void;
   updateSidebar: (note: string) => void;
+  sendStreamStateEvent: (event: StreamStateMachineEvent) => void;
   appendAssistantContent: (contentChunk: string) => void;
   appendSystemMessage: (content: string) => void;
   summarizeToolResult: (toolName: string, input: unknown, output: unknown) => string | null;
@@ -103,12 +106,14 @@ export async function handleResponseChunk({
 }) {
   switch (chunk.type) {
     case "reasoning":
+      sendStreamStateEvent("receive-reasoning");
       if (!activeThinking) {
         startThinkingIndicator("Model is reasoning...");
       }
       updateSidebar("Model is reasoning...");
       break;
     case "content":
+      sendStreamStateEvent("receive-content");
       appendAssistantContent(chunk.content);
       break;
     case "tool-call-start":

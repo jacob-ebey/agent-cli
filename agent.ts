@@ -36,6 +36,7 @@ import type {
   ModelPresetName,
   PendingApproval,
   PersistedConfig,
+  StreamPhase,
   PersistedConversationState,
   PersistedShellApprovals,
   PersistedTranscriptEntry,
@@ -114,6 +115,10 @@ import {
   createComposerHintContent,
   createSidebarViewModel,
 } from "./lib/agent/view-models.ts";
+import {
+  applyStreamStateEvent,
+  type StreamStateMachineEvent,
+} from "./lib/agent/stream-state.ts";
 import { hasMeaningfulTranscript } from "./lib/agent/summarize.ts";
 import {
   buildHistoryPreview,
@@ -238,6 +243,7 @@ restoreWorkspaceSession(initialConversationState.workspaceSession);
 
 let nextIdCounter = 0;
 let busy = false;
+let streamPhase: StreamPhase = "idle";
 let latestTotalTokensUsed: number | null = null;
 
 const DEFAULT_TOKEN_WINDOW = 272_000;
@@ -311,6 +317,7 @@ function announceActiveApproval() {
       .filter(Boolean)
       .join("\n")
   );
+  sendStreamStateEvent("await-approval");
   updateSidebar(
     `Waiting for approval for ${activeApproval.displayLabel.toLowerCase()} ${activeApproval.displayValue}.`
   );
@@ -329,6 +336,10 @@ function activateNextApproval() {
   if (activeApproval) {
     announceActiveApproval();
     return;
+  }
+
+  if (busy) {
+    sendStreamStateEvent("approval-resolved");
   }
 
   updateSidebar();
@@ -406,6 +417,7 @@ async function summarizeActiveConversation() {
     setBusy,
     setModeNormal: () => setMode("normal"),
     startThinkingIndicator,
+    sendStreamStateEvent,
     updateSidebar,
     appendSystemMessage,
     appendEntry: (role, content) => appendEntry(role, content),
@@ -471,10 +483,15 @@ async function archiveCurrentConversation() {
   }
 }
 
+function sendStreamStateEvent(event: StreamStateMachineEvent) {
+  streamPhase = applyStreamStateEvent(streamPhase, event);
+}
+
 function setBusy(nextBusy: boolean) {
   busy = nextBusy;
   if (!busy) {
     stopThinkingIndicator();
+    sendStreamStateEvent("reset");
   }
   updateTranscriptTitle();
 }
@@ -1006,6 +1023,7 @@ function buildSidebarPresentationState(): SidebarPresentationState {
     historySelection,
     modelMenuOpen,
     busy,
+    streamPhase,
     activeThinking: activeThinkingIndicator !== null,
     thinkingFrame: THINKING_FRAMES[thinkingFrameIndex] ?? THINKING_FRAMES[0],
     mode,
@@ -1448,6 +1466,8 @@ async function runAgentLoop() {
   try {
     let shouldContinueAgentLoop = true;
 
+    sendStreamStateEvent("connection-established");
+
     while (shouldContinueAgentLoop && !streamAborted) {
       const turnResult = await runSingleAgentTurn({
         model: currentModel,
@@ -1471,6 +1491,7 @@ async function runAgentLoop() {
             activeThinking: activeThinkingIndicator !== null,
             stopThinkingIndicator,
             updateSidebar,
+            sendStreamStateEvent,
             appendAssistantContent: (contentChunk) =>
               appendAssistantStreamContent({
                 state,
@@ -1615,6 +1636,7 @@ async function submitPrompt() {
   await persistActiveConversation();
 
   setBusy(true);
+  sendStreamStateEvent("start-connection");
   insertDraft = "";
   input.setText("");
   setMode("normal");
