@@ -15,8 +15,8 @@ Apply a targeted exact-text edit to a single file in the workspace. In git repos
       "description": "Relative or absolute workspace path to the file to update."
     },
     "old_string": {
-      "type": "string",
-      "description": "Exact existing text to replace. Must be unique unless replace_all is true. Use an empty string only when creating a new file."
+      "type": ["string", "null"],
+      "description": "Exact existing text to replace. Must be unique unless replace_all is true. May be empty, null, or omitted when creating a new file or when writing full contents to an existing empty file."
     },
     "new_string": {
       "type": "string",
@@ -31,7 +31,7 @@ Apply a targeted exact-text edit to a single file in the workspace. In git repos
       "description": "When true, create the file if it does not already exist. Requires old_string to be empty."
     }
   },
-  "required": ["path", "old_string", "new_string"],
+  "required": ["path", "new_string"],
   "additionalProperties": false
 }
 ```
@@ -53,10 +53,11 @@ Behavior:
 - Paths may be relative or absolute, but they must resolve inside the workspace.
 - In git repositories, edits are applied inside a session worktree that mirrors the current workspace state. The tool returns a diff and the UI can upmerge selected files back into the main workspace.
 - When edits are isolated in that session worktree, they do not require a separate approval prompt. If worktrees are unavailable and edits apply directly, approval is still required.
-- For existing files, `old_string` must match the current file contents exactly.
+- For existing non-empty files, `old_string` must match the current file contents exactly.
+- For existing empty files, `old_string` may be `""`, `null`, or omitted; in that case `new_string` becomes the full file contents.
 - By default, `old_string` must match exactly once. If it matches multiple times, the tool errors and asks for a more specific snippet.
 - Set `replace_all` to `true` only when every exact match should be replaced.
-- To create a new file, set `create_if_missing` to `true`, use an empty `old_string`, and put the full file contents in `new_string`.
+- To create a new file, set `create_if_missing` to `true`, use an empty/null/omitted `old_string`, and put the full file contents in `new_string`.
 
 Update example:
 

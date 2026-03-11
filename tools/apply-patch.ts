@@ -62,9 +62,14 @@ export const execute: ToolHandler = async (argumentsObject) => {
     throw new Error("path must be a non-empty string.");
   }
 
-  const oldString = argumentsObject.old_string;
-  if (typeof oldString !== "string") {
-    throw new Error("old_string must be a string.");
+  const rawOldString = argumentsObject.old_string;
+  let oldString = "";
+  if (rawOldString === undefined || rawOldString === null) {
+    oldString = "";
+  } else if (typeof rawOldString === "string") {
+    oldString = rawOldString;
+  } else {
+    throw new Error("old_string must be a string, null, or omitted.");
   }
 
   const newString = argumentsObject.new_string;
@@ -120,11 +125,30 @@ export const execute: ToolHandler = async (argumentsObject) => {
     throw new Error(`path must point to a file: ${relativeWorkspacePath(resolvedPath)}`);
   }
 
+  const raw = await fs.readFile(resolvedPath, "utf-8");
+
   if (!oldString.length) {
-    throw new Error("old_string must be non-empty when editing an existing file.");
+    if (raw.length > 0) {
+      throw new Error(
+        "old_string must be non-empty when editing a non-empty existing file."
+      );
+    }
+
+    await fs.writeFile(resolvedPath, newString, "utf-8");
+
+    if (session.mode !== "worktree") {
+      return `Updated ${relativeWorkspacePath(resolvedPath)}.`;
+    }
+
+    const diff = truncateDiffForDisplay(await getUpmergePreview(trackedEdit.relativePath));
+    return [
+      `Updated ${originalRelativePath} in the agent worktree.`,
+      "Press `u` in the UI to review and upmerge it back into the main workspace.",
+      "",
+      diff,
+    ].join("\n");
   }
 
-  const raw = await fs.readFile(resolvedPath, "utf-8");
   const matchCount = countOccurrences(raw, oldString);
 
   if (matchCount === 0) {
