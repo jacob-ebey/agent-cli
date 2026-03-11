@@ -1,6 +1,15 @@
 import { expect, test } from "bun:test";
 
-import type { Message } from "../lib/llm.ts";
+import type { ResponseChunk, Message } from "../lib/llm.ts";
+import {
+  createAssistantStreamState,
+  handleResponseChunk,
+} from "../lib/agent/streaming.ts";
+import {
+  applyStreamStateEvent,
+  type StreamStateMachineEvent,
+} from "../lib/agent/stream-state.ts";
+import type { StreamPhase } from "../lib/agent/types.ts";
 import {
   appendChunkWithLimit,
   assistantMessageContainsToolCall,
@@ -123,4 +132,64 @@ test("buildConversationPreview formats entries and handles empty state", () => {
   expect(buildConversationPreview([])).toBe(
     "This conversation has no visible transcript."
   );
+});
+
+test("stream phase leaves connecting on first tool activity", async () => {
+  let streamPhase: StreamPhase = "connecting";
+  const events: StreamStateMachineEvent[] = [];
+
+  const sendStreamStateEvent = (event: StreamStateMachineEvent) => {
+    events.push(event);
+    streamPhase = applyStreamStateEvent(streamPhase, event);
+  };
+
+  const chunk: ResponseChunk = {
+    type: "tool-call-start",
+    toolCallId: "call-1",
+    toolName: "read_file",
+  };
+
+  await handleResponseChunk({
+    chunk,
+    state: createAssistantStreamState(),
+    startThinkingIndicator: () => {},
+    activeThinking: false,
+    stopThinkingIndicator: () => {},
+    updateSidebar: () => {},
+    sendStreamStateEvent,
+    appendAssistantContent: () => {},
+    appendSystemMessage: () => "system-1",
+    summarizeToolResult: () => null,
+    refreshUpmergeState: async () => {},
+  });
+
+  expect(events).toContain("receive-reasoning");
+  expect(streamPhase as StreamPhase).toBe("reasoning");
+});
+
+test("stream phase leaves connecting on tool input deltas", async () => {
+  let streamPhase: StreamPhase = "connecting";
+
+  await handleResponseChunk({
+    chunk: {
+      type: "tool-call-delta",
+      toolCallId: "call-1",
+      toolName: "read_file",
+      argumentsDelta: '{"path":"README.md"}',
+    },
+    state: createAssistantStreamState(),
+    startThinkingIndicator: () => {},
+    activeThinking: false,
+    stopThinkingIndicator: () => {},
+    updateSidebar: () => {},
+    sendStreamStateEvent: (event) => {
+      streamPhase = applyStreamStateEvent(streamPhase, event);
+    },
+    appendAssistantContent: () => {},
+    appendSystemMessage: () => "system-1",
+    summarizeToolResult: () => null,
+    refreshUpmergeState: async () => {},
+  });
+
+  expect(streamPhase as StreamPhase).toBe("reasoning");
 });

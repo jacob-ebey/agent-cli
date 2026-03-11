@@ -333,10 +333,15 @@ test("text publish conflicts no longer write conflict markers into main", async 
 
   const result = await worktree.upmergeRelativePath("notes.txt");
   expect(result).toContain("publishing was blocked");
-  expect(result).toContain("Merge main into the worktree again and resolve there before retrying.");
+  expect(result).toContain(
+    "Conflict markers were copied into the worktree so an agent can resolve them there using conversation history."
+  );
 
   expect(await fs.readFile(mainPath, "utf8")).toBe(["start", "main change", "end", ""].join("\n"));
-  expect(await fs.readFile(worktreePath, "utf8")).toBe(["start", "worktree change", "end", ""].join("\n"));
+  expect(await fs.readFile(worktreePath, "utf8")).toContain("<<<<<<< current/notes.txt");
+  expect(await fs.readFile(worktreePath, "utf8")).toContain("main change");
+  expect(await fs.readFile(worktreePath, "utf8")).toContain("worktree change");
+  expect(await fs.readFile(worktreePath, "utf8")).toContain(">>>>>>> edited/notes.txt");
 
   expect(await worktree.getUpmergeStatus()).toEqual({
     mode: "worktree",
@@ -349,9 +354,9 @@ test("text publish conflicts no longer write conflict markers into main", async 
 
   const preview = await worktree.getUpmergePreview("notes.txt");
   expect(preview).toContain("Text upmerge conflict: notes.txt");
-  expect(preview).not.toContain("conflict region");
+  expect(preview).toContain("conflict region");
   expect(preview).toContain("main change");
-  expect(preview).not.toContain("<<<<<<< ");
+  expect(preview).toContain("<<<<<<< current/notes.txt");
 
   await worktree.cleanupWorkspaceSession();
   worktree.restoreWorkspaceSession(null);

@@ -124,11 +124,13 @@ export async function handleResponseChunk({
       break;
     case "tool-call-start":
       state.sawToolActivity = true;
+      sendStreamStateEvent("receive-reasoning");
       stopThinkingIndicator();
       updateSidebar(`Tool requested: ${chunk.toolName}`);
       break;
     case "tool-call-delta":
       state.sawToolActivity = true;
+      sendStreamStateEvent("receive-reasoning");
       stopThinkingIndicator();
       updateSidebar(`Preparing tool input: ${chunk.toolName}`);
       break;
