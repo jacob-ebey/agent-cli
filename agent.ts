@@ -2,13 +2,7 @@ import type { ChildProcess } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
-import {
-  BoxRenderable,
-  ScrollBoxRenderable,
-  TextRenderable,
-  createCliRenderer,
-  type KeyEvent,
-} from "@opentui/core";
+import { createCliRenderer, type KeyEvent } from "@opentui/core";
 
 import {
   generateTextResponse,
@@ -47,7 +41,7 @@ import type {
   PersistedTranscriptEntry,
   ShellExecutionResult,
   ShellVisibility,
-  SidebarViewModel,
+  SidebarPresentationState,
   UpmergeMenuItem,
 } from "./lib/agent/types.ts";
 import {
@@ -128,8 +122,19 @@ import {
 import {
   COMPOSER_MODE_CONFIG,
   ComposerTextarea,
+  attachDetailPanel as attachDetailPanelView,
   createAgentView,
+  detachDetailPanel as detachDetailPanelView,
 } from "./lib/agent/view.ts";
+import {
+  createComposerHintContent,
+  createSidebarViewModel,
+} from "./lib/agent/view-models.ts";
+import {
+  buildConversationSummaryPrompt,
+  createSummarizedConversationState,
+  hasMeaningfulTranscript,
+} from "./lib/agent/summarize.ts";
 import { indexSkills } from "./lib/skills-index.ts";
 import {
   captureWorkspaceSession,
@@ -363,54 +368,6 @@ function startThinkingIndicator(baseNote = latestSidebarNote) {
   }, 80);
 }
 
-function hasMeaningfulTranscript() {
-  return transcriptHistory.some(
-    (entry) =>
-      entry.role === "user" || entry.role === "assistant" || entry.role === "error"
-  );
-}
-
-function formatTranscriptEntryForSummary(entry: PersistedTranscriptEntry) {
-  const label = entry.summary ? `${entry.role} summary` : entry.role;
-  return `${label}:\n${entry.content}`;
-}
-
-function buildConversationSummaryPrompt() {
-  const transcript = transcriptHistory
-    .map((entry) => formatTranscriptEntryForSummary(entry))
-    .join("\n\n");
-
-  return [
-    "Summarize this chat for future continuation after context compression.",
-    "Keep only information that must survive in chat history. Assume anything on disk can be re-read later.",
-    "Prioritize:",
-    "- current user goal and constraints",
-    "- decisions made and why",
-    "- unresolved questions or next steps",
-    "- important runtime findings not guaranteed to exist on disk",
-    "- concise summaries of tool activity and outcomes",
-    "- any temporary state the assistant should remember",
-    "",
-    "Omit or compress aggressively:",
-    "- full file contents",
-    "- verbose tool logs",
-    "- details that can be rediscovered from the repository",
-    "- repetitive back-and-forth",
-    "",
-    "Output plain text using this structure exactly:",
-    "Summary:",
-    "<short paragraph>",
-    "",
-    "Relevant context to retain:",
-    "- ...",
-    "",
-    "Open questions / next steps:",
-    "- ...",
-    "",
-    "Transcript:",
-    transcript || "(empty)",
-  ].join("\n");
-}
 
 async function summarizeActiveConversation() {
   if (busy) {
@@ -419,7 +376,7 @@ async function summarizeActiveConversation() {
     return;
   }
 
-  if (!hasMeaningfulTranscript()) {
+  if (!hasMeaningfulTranscript(transcriptHistory)) {
     appendSystemMessage("Nothing to summarize yet.");
     commandDraft = "";
     setMode("normal");
@@ -443,7 +400,7 @@ async function summarizeActiveConversation() {
         },
         {
           role: "user",
-          content: buildConversationSummaryPrompt(),
+          content: buildConversationSummaryPrompt(transcriptHistory),
         },
       ],
     });
@@ -457,22 +414,13 @@ async function summarizeActiveConversation() {
       return;
     }
 
-    const preservedConversation = createInitialConversationMessages();
-    const preservedTranscript: PersistedTranscriptEntry[] = [
-      {
-        role: "system",
-        content: "Previous conversation context was compressed into the following summary.",
-        summary: true,
-      },
-      {
-        role: "assistant",
-        content: summary,
-        summary: true,
-      },
-    ];
+    const preservedState = createSummarizedConversationState({
+      summary,
+      createInitialConversationMessages,
+    });
 
-    conversation.splice(0, conversation.length, ...preservedConversation);
-    transcriptHistory.splice(0, transcriptHistory.length, ...preservedTranscript);
+    conversation.splice(0, conversation.length, ...preservedState.conversation);
+    transcriptHistory.splice(0, transcriptHistory.length, ...preservedState.transcript);
     restoreTranscriptFromHistory();
     await persistActiveConversation();
     updateSidebar("Conversation summarized and compressed.");
@@ -526,7 +474,7 @@ async function persistActiveConversation() {
 }
 
 async function archiveCurrentConversation() {
-  if (!hasMeaningfulTranscript() && captureWorkspaceSession() === null) {
+  if (!hasMeaningfulTranscript(transcriptHistory) && captureWorkspaceSession() === null) {
     return false;
   }
 
@@ -766,43 +714,26 @@ async function refreshUpmergeState() {
 }
 
 function attachDetailPanel(kind: Exclude<DetailPanel, null>) {
-  if (detailPanelAttached === kind) {
-    return;
-  }
-
-  if (detailPanelAttached === "upmerge") {
-    main.remove(upmergePanel.id);
-  } else if (detailPanelAttached === "history") {
-    main.remove(historyPanel.id);
-  } else if (detailPanelAttached === "model") {
-    main.remove(modelPanel.id);
-  }
-
-  main.remove(sidebar.id);
-  main.add(
-    kind === "upmerge"
-      ? upmergePanel
-      : kind === "history"
-        ? historyPanel
-        : modelPanel
-  );
-  main.add(sidebar);
-  detailPanelAttached = kind;
+  detailPanelAttached = attachDetailPanelView({
+    main,
+    sidebar,
+    upmergePanel,
+    historyPanel,
+    modelPanel,
+    detailPanelAttached,
+    kind,
+  });
 }
 
 function detachDetailPanel(kind: Exclude<DetailPanel, null>) {
-  if (detailPanelAttached !== kind) {
-    return;
-  }
-
-  main.remove(
-    kind === "upmerge"
-      ? upmergePanel.id
-      : kind === "history"
-        ? historyPanel.id
-        : modelPanel.id
-  );
-  detailPanelAttached = null;
+  detailPanelAttached = detachDetailPanelView({
+    main,
+    upmergePanel,
+    historyPanel,
+    modelPanel,
+    detailPanelAttached,
+    kind,
+  });
 }
 
 function closeUpmergeMenu() {
@@ -1204,218 +1135,44 @@ async function settlePendingApproval(decision: ApprovalDecision) {
   });
 }
 
-function createApprovalSidebarViewModel(note: string): SidebarViewModel {
-  const approvalShortcuts =
-    activeApproval?.approvalPersistence === "persisted"
-      ? [
-          "y      approve once",
-          "a      always approve this command",
-          "n/Esc  deny this command",
-        ]
-      : ["y      approve for session", "n/Esc  deny this edit"];
-
+function buildSidebarPresentationState(): SidebarPresentationState {
   return {
-    title: "Approval",
-    borderColor: "#f59e0b",
-    content: [
-      "Status: waiting",
-      `Tool: ${activeApproval!.toolName}`,
-      `${activeApproval!.displayLabel}: ${activeApproval!.displayValue}`,
-      `Queued: ${queuedApprovals.length}`,
-      "",
-      "Shortcuts",
-      ...approvalShortcuts,
-      "",
-      note,
-    ].join("\n"),
+    activeApproval,
+    queuedApprovalsCount: queuedApprovals.length,
+    upmergeMenuOpen,
+    upmergeMode,
+    upmergeItems,
+    upmergeSelection,
+    upmergeNote,
+    historyMenuOpen,
+    historyItems,
+    historySelection,
+    modelMenuOpen,
+    busy,
+    activeThinking: activeThinkingIndicator !== null,
+    thinkingFrame: THINKING_FRAMES[thinkingFrameIndex] ?? THINKING_FRAMES[0],
+    mode,
+    currentModel,
+    entriesCount: entries.length,
+    autoScrollState,
+    activeShellProcess: activeShellProcess !== null,
+    insertDraft,
   };
-}
-
-function createUpmergeSidebarViewModel(note: string): SidebarViewModel {
-  const items = currentUpmergeItems();
-  return {
-    title: "Upmerge",
-    borderColor: "#22c55e",
-    content: [
-      `Edits: ${upmergeMode}`,
-      `Pending: ${upmergeItems.length}`,
-      "",
-      items.length
-        ? items
-            .map(
-              (item, index) => `${index === upmergeSelection ? ">" : " "} ${item.label}`
-            )
-            .join("\n")
-        : "No pending upmerges.",
-      "",
-      "Shortcuts",
-      "Enter  upmerge selected item",
-      "r      revert selected file",
-      "j / k  change selection",
-      "u/Esc  close menu",
-      "",
-      note,
-    ].join("\n"),
-  };
-}
-
-function createHistorySidebarViewModel(note: string): SidebarViewModel {
-  return {
-    title: "History",
-    borderColor: "#38bdf8",
-    content: [
-      `Saved chats: ${historyItems.length}`,
-      "",
-      historyItems.length
-        ? historyItems
-            .map(
-              (item, index) =>
-                `${index === historySelection ? ">" : " "} ${item.title} (${formatConversationTimestamp(
-                  item.updatedAt
-                )})`
-            )
-            .join("\n")
-        : "No saved conversations.",
-      "",
-      "Shortcuts",
-      "Enter  load selected chat",
-      "d      delete selected chat",
-      "j / k  change selection",
-      "Esc    close history",
-      "",
-      note,
-    ].join("\n"),
-  };
-}
-
-function createSessionSidebarViewModel(note: string): SidebarViewModel {
-  const thinkingBadge =
-    busy && activeThinkingIndicator
-      ? ` ${THINKING_FRAMES[thinkingFrameIndex]} thinking`
-      : "";
-
-  return {
-    title: "Session",
-    borderColor: "#334155",
-    content: [
-      `Status: ${busy ? "streaming" : "idle"}${thinkingBadge}`,
-      `Mode: ${mode}`,
-      `Model: ${currentModel}`,
-      `Messages: ${entries.length}`,
-      `Upmerges: ${upmergeItems.length}`,
-      "",
-      "Shortcuts",
-      "i      insert mode",
-      ":      command mode",
-      "!      shell mode",
-      "@      agent shell mode",
-      "j / k  scroll transcript",
-      "G      jump to live bottom",
-      "u      upmerge menu",
-      "Esc    normal mode",
-      "Ctrl+C abort stream/command",
-      "",
-      "Commands",
-      ":clear reset conversation",
-      ":history browse saved chats",
-      ":index embed skill chunks",
-      ":model open searchable model picker",
-      ":summarize compress chat history",
-      ":quit  exit UI",
-      "",
-      upmergeNote,
-      "",
-      note,
-    ].join("\n"),
-  };
-}
-
-function createSidebarViewModel(note: string): SidebarViewModel {
-  if (activeApproval) {
-    return createApprovalSidebarViewModel(note);
-  }
-
-  if (upmergeMenuOpen) {
-    return createUpmergeSidebarViewModel(note);
-  }
-
-  if (historyMenuOpen) {
-    return createHistorySidebarViewModel(note);
-  }
-
-  return createSessionSidebarViewModel(note);
-}
-
-function createComposerHintContent() {
-  if (activeApproval) {
-    return activeApproval.approvalPersistence === "persisted"
-      ? `Approval required. Press y to allow this command once, a to always allow this exact command, or n to deny.${
-          queuedApprovals.length
-            ? ` ${queuedApprovals.length} more approval request(s) are queued.`
-            : ""
-        }`
-      : `Approval required. Press y to allow this file for the session, or n to deny.${
-          queuedApprovals.length
-            ? ` ${queuedApprovals.length} more approval request(s) are queued.`
-            : ""
-        }`;
-  }
-
-  if (upmergeMenuOpen) {
-    return "Upmerge menu open. Enter upmerges the selection, r reverts a selected file, and u/Esc closes it.";
-  }
-
-  if (historyMenuOpen) {
-    return "History browser open. Enter loads the selected conversation, d deletes it, and Esc closes the browser.";
-  }
-
-  if (modelMenuOpen) {
-    return "Model picker open. Use j/k to move, . to filter, Enter to select, Backspace to edit the filter, and Esc to close.";
-  }
-
-  if (busy) {
-    return activeShellProcess
-      ? autoScrollState === "paused"
-        ? "A shell command is running. Auto-scroll is paused while you audit earlier output. Press G to jump back to the live bottom, or Ctrl+C to stop it."
-        : "A shell command is running. Press Ctrl+C to stop it, or use j and k to inspect earlier messages."
-      : autoScrollState === "paused"
-        ? "The agent is responding. Auto-scroll is paused while you audit earlier output. Press G to jump back to the live bottom, or Ctrl+C to abort."
-        : "The agent is responding. Press Ctrl+C to abort, or use j and k to inspect earlier messages.";
-  }
-
-  if (mode === "normal") {
-    return "Normal mode. Press i to compose, : for commands, !/@ for shell, u for upmerge, or j/k to scroll.";
-  }
-
-  if (mode === "command") {
-    return "Command mode. Run :clear, :history, :index, :model, :summarize, or :quit, or press Esc to return to normal.";
-  }
-
-  if (mode === "shell") {
-    return "Shell mode. Press Enter to run a local shell command that stays hidden from the agent.";
-  }
-
-  if (mode === "agent_shell") {
-    return "Agent shell mode. Press Enter to run a shell command and add its command and output to the agent conversation.";
-  }
-
-  if (!insertDraft.trim()) {
-    return "Insert mode. Press Enter to send or Shift+Enter to insert a new line.";
-  }
-
-  return `Ready to send ${insertDraft.trim().length} characters.`;
 }
 
 function updateSidebar(note = "Ready for your next prompt.") {
   latestSidebarNote = note;
-  const sidebarViewModel = createSidebarViewModel(note);
+  const sidebarViewModel = createSidebarViewModel(
+    buildSidebarPresentationState(),
+    note
+  );
   sidebar.title = sidebarViewModel.title;
   sidebar.borderColor = sidebarViewModel.borderColor;
   sidebarText.content = sidebarViewModel.content;
 }
 
 function updateComposerHint() {
-  composerHint.content = createComposerHintContent();
+  composerHint.content = createComposerHintContent(buildSidebarPresentationState());
 }
 
 function appendEntry(

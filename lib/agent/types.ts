@@ -157,3 +157,26 @@ export type SidebarViewModel = {
   borderColor: string;
   content: string;
 };
+
+export type SidebarPresentationState = {
+  activeApproval: PendingApproval | null;
+  queuedApprovalsCount: number;
+  upmergeMenuOpen: boolean;
+  upmergeMode: "direct" | "worktree";
+  upmergeItems: UpmergeMenuItem[];
+  upmergeSelection: number;
+  upmergeNote: string;
+  historyMenuOpen: boolean;
+  historyItems: ConversationHistoryItem[];
+  historySelection: number;
+  modelMenuOpen: boolean;
+  busy: boolean;
+  activeThinking: boolean;
+  thinkingFrame: string;
+  mode: Mode;
+  currentModel: string;
+  entriesCount: number;
+  autoScrollState: AutoScrollState;
+  activeShellProcess: boolean;
+  insertDraft: string;
+};

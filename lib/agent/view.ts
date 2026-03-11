@@ -8,6 +8,8 @@ import {
 
 import type { Mode } from "./types.ts";
 
+export type DetailPanelKind = "upmerge" | "history" | "model";
+
 export class ComposerTextarea extends TextareaRenderable {
   mode: string = "normal";
 
@@ -297,4 +299,72 @@ export function createAgentView(renderer: ConstructorParameters<typeof BoxRender
     input,
     composerHint,
   };
+}
+
+export function attachDetailPanel(options: {
+  main: BoxRenderable;
+  sidebar: BoxRenderable;
+  upmergePanel: BoxRenderable;
+  historyPanel: BoxRenderable;
+  modelPanel: BoxRenderable;
+  detailPanelAttached: DetailPanelKind | null;
+  kind: DetailPanelKind;
+}) {
+  const {
+    main,
+    sidebar,
+    upmergePanel,
+    historyPanel,
+    modelPanel,
+    detailPanelAttached,
+    kind,
+  } = options;
+
+  if (detailPanelAttached === kind) {
+    return detailPanelAttached;
+  }
+
+  if (detailPanelAttached === "upmerge") {
+    main.remove(upmergePanel.id);
+  } else if (detailPanelAttached === "history") {
+    main.remove(historyPanel.id);
+  } else if (detailPanelAttached === "model") {
+    main.remove(modelPanel.id);
+  }
+
+  main.remove(sidebar.id);
+  main.add(
+    kind === "upmerge"
+      ? upmergePanel
+      : kind === "history"
+        ? historyPanel
+        : modelPanel
+  );
+  main.add(sidebar);
+  return kind;
+}
+
+export function detachDetailPanel(options: {
+  main: BoxRenderable;
+  upmergePanel: BoxRenderable;
+  historyPanel: BoxRenderable;
+  modelPanel: BoxRenderable;
+  detailPanelAttached: DetailPanelKind | null;
+  kind: DetailPanelKind;
+}) {
+  const { main, upmergePanel, historyPanel, modelPanel, detailPanelAttached, kind } =
+    options;
+
+  if (detailPanelAttached !== kind) {
+    return detailPanelAttached;
+  }
+
+  main.remove(
+    kind === "upmerge"
+      ? upmergePanel.id
+      : kind === "history"
+        ? historyPanel.id
+        : modelPanel.id
+  );
+  return null;
 }
