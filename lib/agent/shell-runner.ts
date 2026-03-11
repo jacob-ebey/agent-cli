@@ -1,11 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
 
-import { WORKSPACE_ROOT } from "./constants.ts";
 import type { ShellExecutionResult } from "./types.ts";
 import { appendChunkWithLimit } from "./utils.ts";
 
 export async function runShellCommandSession(options: {
   command: string;
+  cwd?: string;
   onUpdate: (state: {
     stdout: string;
     stderr: string;
@@ -25,7 +25,7 @@ export async function runShellCommandSession(options: {
     process.platform === "win32"
       ? ["/d", "/s", "/c", options.command]
       : ["-lc", options.command];
-  const cwd = WORKSPACE_ROOT;
+  const cwd = options.cwd ?? process.cwd();
 
   let stdout = "";
   let stderr = "";
