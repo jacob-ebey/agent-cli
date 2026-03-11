@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { generateTextResponse, streamResponse, type Message, type Tool } from "../llm.ts";
 import { indexSkills } from "../skills-index.ts";
 import { MODEL_PRESETS, ROOT_AGENTS_PATH, WORKSPACE_ROOT } from "./constants.ts";
+import { getActiveWorkspaceRoot } from "../../worktree.ts";
 import { buildConversationSummaryPrompt, createSummarizedConversationState, hasMeaningfulTranscript } from "./summarize.ts";
 import { resolveModelCommand } from "./model-menu.ts";
 import { appendChunkWithLimit, extractAssistantText } from "./utils.ts";
@@ -395,7 +396,8 @@ export async function showPlanCommand(options: {
   options.setCommandDraft("");
   options.setModeNormal();
 
-  const displayPath = path.relative(process.cwd(), options.planPath) || ".agents/PLAN.md";
+  const displayPath =
+    path.relative(getActiveWorkspaceRoot(), options.planPath) || ".agents/PLAN.md";
 
   try {
     const content = await fs.readFile(options.planPath, "utf8");
