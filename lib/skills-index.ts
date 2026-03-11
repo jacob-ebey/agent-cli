@@ -370,11 +370,19 @@ export async function indexSkills(workspaceRoot: string) {
     throw new Error("No non-empty skill content was found to index.");
   }
 
-  const embeddings = await embedValues(
-    chunkInputs.map((chunk) =>
-      [`Skill: ${chunk.name}`, `Section: ${chunk.section}`, chunk.content].join("\n")
-    )
-  );
+  let embeddings: number[][];
+  try {
+    embeddings = await embedValues(
+      chunkInputs.map((chunk) =>
+        [`Skill: ${chunk.name}`, `Section: ${chunk.section}`, chunk.content].join("\n")
+      )
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Unable to build the skills index offline-safe fallback data because embeddings could not be generated. ${message}`
+    );
+  }
 
   const index: SkillsIndex = {
     version: INDEX_VERSION,
@@ -415,7 +423,15 @@ export async function searchSkillsIndex(
     };
   }
 
-  const [queryEmbedding] = await embedValues([trimmedQuery]);
+  let queryEmbedding: number[] | undefined;
+  try {
+    [queryEmbedding] = await embedValues([trimmedQuery]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Skill search is unavailable because the query embedding request failed. ${message}`
+    );
+  }
   const results = index.chunks
     .map((chunk) => ({
       name: chunk.name,

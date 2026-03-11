@@ -72,34 +72,48 @@ function normalizeOpenAIBaseURL(value: string) {
   return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
 }
 
-const openAIBase = process.env.OPENAI_API_BASE;
-const openAIKey = process.env.OPENAI_API_KEY;
+const openAIBase = process.env.OPENAI_API_BASE?.trim() || null;
+const openAIKey = process.env.OPENAI_API_KEY?.trim() || null;
 const ollamaBase = process.env.OLLAMA_API_BASE;
 const DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small";
 const DEFAULT_OLLAMA_BASE = "http://127.0.0.1:11434";
 const OPENAI_COMPATIBLE_MODELS_PATH = "/models";
 const OLLAMA_TAGS_PATH = "/api/tags";
 
-if (!openAIBase) {
-  throw new Error("Missing OPENAI_API_BASE environment variable.");
-}
-
-if (!openAIKey) {
-  throw new Error("Missing OPENAI_API_KEY environment variable.");
-}
-
-const shopifyGateway = createOpenAICompatible<string, never, string, never>({
-  name: "shopify-llm-gateway",
-  baseURL: normalizeOpenAIBaseURL(openAIBase),
-  apiKey: openAIKey,
-  includeUsage: true,
-});
+const shopifyGateway =
+  openAIBase && openAIKey
+    ? createOpenAICompatible<string, never, string, never>({
+        name: "shopify-llm-gateway",
+        baseURL: normalizeOpenAIBaseURL(openAIBase),
+        apiKey: openAIKey,
+        includeUsage: true,
+      })
+    : null;
 
 const ollamaGateway = createOpenAICompatible<string, never, string, never>({
   name: "ollama",
   baseURL: normalizeOpenAIBaseURL(ollamaBase?.trim() || DEFAULT_OLLAMA_BASE),
   includeUsage: true,
 });
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+function describeConnectionFailure(error: unknown, action: string) {
+  const detail = error instanceof Error ? error.message : String(error);
+  return `${action} failed: ${detail}`;
+}
+
+function requireRemoteGateway() {
+  if (!shopifyGateway) {
+    throw new Error(
+      "Remote model access is unavailable. Set OPENAI_API_BASE and OPENAI_API_KEY, or switch to an ollama:* model for offline/local use."
+    );
+  }
+
+  return shopifyGateway;
+}
 
 function isOllamaModel(model: string) {
   return model.startsWith("ollama:");
@@ -115,7 +129,7 @@ function getChatModel(model: string) {
     return ollamaGateway.chatModel(stripModelProviderPrefix(model));
   }
 
-  return shopifyGateway.chatModel(model);
+  return requireRemoteGateway().chatModel(model);
 }
 
 export function getEmbeddingModelId() {
@@ -239,27 +253,40 @@ async function fetchOllamaModels(baseURL: string) {
 }
 
 export async function listAvailableModels() {
-  const results = await Promise.allSettled([
-    fetchOpenAICompatibleModels({
-      baseURL: openAIBase ?? "",
-      headers: openAIKey
-        ? {
-            Authorization: `Bearer ${openAIKey}`,
-          }
-        : undefined,
-      provider: "shopify",
-    }),
-    fetchOllamaModels(ollamaBase?.trim() || DEFAULT_OLLAMA_BASE),
-  ]);
+  const tasks: Promise<AvailableModel[]>[] = [];
+  const configurationErrors: string[] = [];
+
+  if (openAIBase && openAIKey) {
+    tasks.push(
+      fetchOpenAICompatibleModels({
+        baseURL: openAIBase,
+        headers: {
+          Authorization: `Bearer ${openAIKey}`,
+        },
+        provider: "shopify",
+      })
+    );
+  } else {
+    configurationErrors.push(
+      "Remote models are unavailable because OPENAI_API_BASE and OPENAI_API_KEY are not both configured."
+    );
+  }
+
+  tasks.push(fetchOllamaModels(ollamaBase?.trim() || DEFAULT_OLLAMA_BASE));
+
+  const results = await Promise.allSettled(tasks);
 
   const models = results.flatMap((result) =>
     result.status === "fulfilled" ? result.value : []
   );
-  const errors = results.flatMap((result) =>
-    result.status === "rejected"
-      ? [result.reason instanceof Error ? result.reason.message : String(result.reason)]
-      : []
-  );
+  const errors = [
+    ...configurationErrors,
+    ...results.flatMap((result) =>
+      result.status === "rejected"
+        ? [result.reason instanceof Error ? result.reason.message : String(result.reason)]
+        : []
+    ),
+  ];
 
   const deduped = new Map<string, AvailableModel>();
   for (const model of models) {
@@ -279,12 +306,22 @@ export async function embedValues(values: string[]) {
     return [] as number[][];
   }
 
-  const { embeddings } = await embedMany({
-    model: shopifyGateway.embeddingModel(getEmbeddingModelId()),
-    values,
-  });
+  const gateway = requireRemoteGateway();
 
-  return embeddings;
+  try {
+    const { embeddings } = await embedMany({
+      model: gateway.embeddingModel(getEmbeddingModelId()),
+      values,
+    });
+
+    return embeddings;
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+
+    throw new Error(describeConnectionFailure(error, "Embedding request"));
+  }
 }
 
 function sanitizeMessages(messages: Message[]): ModelMessage[] {
@@ -307,13 +344,21 @@ export async function generateTextResponse({
   messages: Message[];
   abortSignal?: AbortSignal;
 }) {
-  const result = streamText({
-    model: getChatModel(model),
-    messages: sanitizeMessages(messages),
-    abortSignal,
-  });
+  try {
+    const result = streamText({
+      model: getChatModel(model),
+      messages: sanitizeMessages(messages),
+      abortSignal,
+    });
 
-  return (await result.text).trim();
+    return (await result.text).trim();
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+
+    throw new Error(describeConnectionFailure(error, `Text generation with model ${model}`));
+  }
 }
 
 export function streamResponse({
@@ -327,113 +372,131 @@ export function streamResponse({
   tools?: Tool[];
   abortSignal?: AbortSignal;
 }) {
-  const result = streamText({
-    model: getChatModel(model),
-    messages: sanitizeMessages(messages),
-    abortSignal,
-    tools: Object.fromEntries(
-      (tools ?? []).map((tool) => [
-        tool.name,
-        dynamicTool({
-          description: tool.description,
-          inputSchema: jsonSchema(tool.inputSchema as any),
-          execute: tool.execute,
-        }),
-      ])
-    ),
-    stopWhen: stepCountIs(10),
-  });
+  try {
+    const result = streamText({
+      model: getChatModel(model),
+      messages: sanitizeMessages(messages),
+      abortSignal,
+      tools: Object.fromEntries(
+        (tools ?? []).map((tool) => [
+          tool.name,
+          dynamicTool({
+            description: tool.description,
+            inputSchema: jsonSchema(tool.inputSchema as any),
+            execute: tool.execute,
+          }),
+        ])
+      ),
+      stopWhen: stepCountIs(10),
+    });
 
-  return {
-    stream: (async function* (): AsyncGenerator<ResponseChunk> {
-      const activeToolNames = new Map<string, string>();
+    return {
+      stream: (async function* (): AsyncGenerator<ResponseChunk> {
+        const activeToolNames = new Map<string, string>();
 
-      for await (const part of result.fullStream as AsyncIterable<any>) {
-        switch (part.type) {
-          case "error":
-            throw part.error instanceof Error ? part.error : new Error(String(part.error));
-          case "reasoning":
-          case "reasoning-delta":
-            {
-              const reasoning = getStreamText(part);
-              if (reasoning) {
-                yield {
-                  type: "reasoning",
-                  reasoning,
-                };
+        try {
+          for await (const part of result.fullStream as AsyncIterable<any>) {
+            switch (part.type) {
+              case "error":
+                throw part.error instanceof Error
+                  ? part.error
+                  : new Error(String(part.error));
+              case "reasoning":
+              case "reasoning-delta": {
+                const reasoning = getStreamText(part);
+                if (reasoning) {
+                  yield {
+                    type: "reasoning",
+                    reasoning,
+                  };
+                }
+                break;
               }
-            }
-            break;
-          case "text":
-          case "text-delta":
-            {
-              const content = getStreamText(part);
-              if (content) {
-                yield {
-                  type: "content",
-                  content,
-                };
+              case "text":
+              case "text-delta": {
+                const content = getStreamText(part);
+                if (content) {
+                  yield {
+                    type: "content",
+                    content,
+                  };
+                }
+                break;
               }
-            }
-            break;
-          case "tool-input-start":
-            activeToolNames.set(part.id, part.toolName);
-            yield {
-              type: "tool-call-start",
-              toolCallId: part.id,
-              toolName: part.toolName,
-            };
-            break;
-          case "tool-input-delta":
-            {
-              const argumentsDelta = getStreamText(part);
-              if (argumentsDelta) {
+              case "tool-input-start":
+                activeToolNames.set(part.id, part.toolName);
                 yield {
-                  type: "tool-call-delta",
+                  type: "tool-call-start",
                   toolCallId: part.id,
-                  toolName: activeToolNames.get(part.id) ?? "",
-                  argumentsDelta,
+                  toolName: part.toolName,
                 };
+                break;
+              case "tool-input-delta": {
+                const argumentsDelta = getStreamText(part);
+                if (argumentsDelta) {
+                  yield {
+                    type: "tool-call-delta",
+                    toolCallId: part.id,
+                    toolName: activeToolNames.get(part.id) ?? "",
+                    argumentsDelta,
+                  };
+                }
+                break;
               }
-            }
-            break;
-          case "tool-input-end":
-            activeToolNames.delete(part.id);
-            break;
-          case "tool-call-streaming-start":
-          case "tool-call":
-            activeToolNames.set(part.toolCallId, part.toolName);
-            yield {
-              type: "tool-call-start",
-              toolCallId: part.toolCallId,
-              toolName: part.toolName,
-            };
-            break;
-          case "tool-call-delta":
-            {
-              const argumentsDelta = getStreamText(part) ?? part.argsTextDelta;
-              if (typeof argumentsDelta === "string" && argumentsDelta) {
+              case "tool-input-end":
+                activeToolNames.delete(part.id);
+                break;
+              case "tool-call-streaming-start":
+              case "tool-call":
+                activeToolNames.set(part.toolCallId, part.toolName);
                 yield {
-                  type: "tool-call-delta",
+                  type: "tool-call-start",
                   toolCallId: part.toolCallId,
                   toolName: part.toolName,
-                  argumentsDelta,
                 };
+                break;
+              case "tool-call-delta": {
+                const argumentsDelta = getStreamText(part) ?? part.argsTextDelta;
+                if (typeof argumentsDelta === "string" && argumentsDelta) {
+                  yield {
+                    type: "tool-call-delta",
+                    toolCallId: part.toolCallId,
+                    toolName: part.toolName,
+                    argumentsDelta,
+                  };
+                }
+                break;
               }
+              case "tool-result":
+                yield {
+                  type: "tool-result",
+                  toolCallId: part.toolCallId,
+                  toolName: part.toolName,
+                  input: part.input,
+                  output: part.output,
+                };
+                break;
             }
-            break;
-          case "tool-result":
-            yield {
-              type: "tool-result",
-              toolCallId: part.toolCallId,
-              toolName: part.toolName,
-              input: part.input,
-              output: part.output,
-            };
-            break;
+          }
+        } catch (error) {
+          if (isAbortError(error)) {
+            throw error;
+          }
+
+          throw new Error(
+            describeConnectionFailure(error, `Streaming response with model ${model}`)
+          );
         }
-      }
-    })(),
-    responseMessages: Promise.resolve(result.response).then((response: any) => response.messages as Message[]),
-  };
+      })(),
+      responseMessages: Promise.resolve(result.response).then(
+        (response: any) => response.messages as Message[]
+      ),
+    };
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+
+    throw new Error(describeConnectionFailure(error, `Streaming setup with model ${model}`));
+  }
 }
