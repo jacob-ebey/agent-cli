@@ -1,17 +1,20 @@
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 
-import { generateTextResponse } from "../llm.ts";
+import { generateTextResponse, streamResponse, type Message, type Tool } from "../llm.ts";
 import { indexSkills } from "../skills-index.ts";
-import { MODEL_PRESETS, WORKSPACE_ROOT } from "./constants.ts";
+import { MODEL_PRESETS, ROOT_AGENTS_PATH, WORKSPACE_ROOT } from "./constants.ts";
 import { buildConversationSummaryPrompt, createSummarizedConversationState, hasMeaningfulTranscript } from "./summarize.ts";
 import { resolveModelCommand } from "./model-menu.ts";
-import type { ConversationMessage, PersistedTranscriptEntry } from "./types.ts";
+import { appendChunkWithLimit, extractAssistantText } from "./utils.ts";
+import type { AgentsContextResult, ConversationMessage, LoadedTool, PersistedTranscriptEntry } from "./types.ts";
 
 export function describeHelpOptions(currentModel: string) {
   return [
     "Available commands",
     "",
     ":help       show available commands",
+    ":agents-md  create or update the workspace AGENTS.md",
     ":clear      reset the current conversation",
     ":history    open saved conversation history",
     ":index      embed and refresh skill chunks",
@@ -23,6 +26,252 @@ export function describeHelpOptions(currentModel: string) {
     "",
     describeModelOptions(currentModel),
   ].join("\n");
+}
+
+export function buildAgentsMdSystemPrompt() {
+  return [
+    "You are a focused sub-agent that generates the repository's root AGENTS.md content.",
+    "",
+    "You do not edit files directly. Your only job is to inspect the repository with the allowed tools and then call `create_agents_context` exactly once with the final markdown.",
+    "",
+    "Tool constraints:",
+    "- You only have read-only discovery tools plus `create_agents_context`.",
+    "- Do not attempt file edits, shell commands, or any write action.",
+    "- End the loop by calling `create_agents_context` with the full AGENTS.md content.",
+    "",
+    "Primary goal:",
+    "- Produce a compact, high-signal AGENTS.md rooted in facts discoverable from the repository.",
+    "",
+    "Required outcomes:",
+    "- Create content suitable for the repository root AGENTS.md file.",
+    "- Preserve and incorporate any existing AGENTS.md guidance that is still accurate and useful.",
+    "- Prefer merging and refining over replacing wholesale unless the current file is clearly low-quality or obsolete.",
+    "",
+    "Use the available tools to inspect the repository before finalizing. Do not guess.",
+    "",
+    "Initial context is already provided via:",
+    "- the standard repository system prompt",
+    "- an initial `list_project_tree` call",
+    "- an initial `read_file` of `package.json`",
+    "- an initial `read_file` of `AGENTS.md` when available",
+    "",
+    "Suggested workflow:",
+    "1. Inspect package manifests, README/docs, and a small curated repository tree.",
+    "2. Identify canonical install, run, test, lint, typecheck, and build commands.",
+    "3. Infer the repo map and major subsystems from actual files.",
+    "4. Extract important invariants, workflows, and sharp edges from code and docs.",
+    "5. Read any existing AGENTS.md and preserve project-specific guidance that remains valid.",
+    "6. Call `create_agents_context` with a concise AGENTS.md markdown document.",
+    "",
+    "Target content budget:",
+    "- Aim for roughly 80-200 lines.",
+    "- Keep it dense and practical.",
+    "- Prefer bullets over prose.",
+    "",
+    "Prioritize these sections when information is available:",
+    "- Project Summary",
+    "- Standard Commands",
+    "- Repo Map",
+    "- Important Invariants",
+    "- Preferred Patterns",
+    "- Change Policy",
+    "- Validation",
+    "- Environment / Services",
+    "- Sharp Edges",
+    "- Glossary or Active Migrations if they are clearly supported by evidence",
+    "",
+    "Quality bar:",
+    "- Be specific, not generic.",
+    "- Distinguish confirmed facts from cautious inferences.",
+    "- Do not invent commands, architecture, or policies.",
+    "- If something is unknown, omit it rather than speculate.",
+    "- Mention generated files or machine-managed paths when relevant.",
+    "- Call out validation commands that should be run after edits.",
+    "",
+    "Output requirements:",
+    "- The `markdown` field passed to `create_agents_context` must be the complete AGENTS.md file contents.",
+    "- Write polished markdown with short headings and concise bullets.",
+    "- Keep the document useful to another agent, not promotional to humans.",
+    "- Avoid copying large README sections verbatim.",
+    "",
+    "Stop condition:",
+    "- Finish only by calling `create_agents_context` once you have the final AGENTS.md content.",
+  ].join("\n");
+}
+
+function buildAgentsMdReadonlyTools(loadedTools: Map<string, LoadedTool>): Tool[] {
+  const readonlyToolNames = new Set([
+    "list_project_tree",
+    "read_file",
+    "search_skills",
+    "web_fetch",
+    "web_search",
+    "ripgrep",
+    "ast-grep",
+    "create_agents_context",
+  ]);
+
+  return Array.from(loadedTools.values(), (tool) => tool.definition.name)
+    .filter((name) => readonlyToolNames.has(name))
+    .map((name) => {
+      const tool = loadedTools.get(name);
+      if (!tool) {
+        throw new Error(`Missing required AGENTS.md tool: ${name}`);
+      }
+
+      return {
+        name: tool.definition.name,
+        description: tool.definition.description,
+        inputSchema: tool.definition.inputSchema,
+        execute: async (input: unknown) =>
+          tool.execute(typeof input === "object" && input !== null ? (input as Record<string, unknown>) : {}),
+      } satisfies Tool;
+    });
+}
+
+function parseAgentsContextResult(output: unknown): AgentsContextResult | null {
+  if (typeof output !== "string") {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(output) as { markdown?: unknown };
+    return typeof parsed.markdown === "string" ? { markdown: parsed.markdown } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeAgentsMd(markdown: string) {
+  const normalized = markdown.trim() ? `${markdown.trimEnd()}\n` : "";
+  await fs.writeFile(ROOT_AGENTS_PATH, normalized, "utf-8");
+}
+
+export async function runAgentsMdCommand(options: {
+  busy: boolean;
+  currentModel: string;
+  loadedTools: Map<string, LoadedTool>;
+  initialSystemMessage: string;
+  initialToolMessages: ConversationMessage[];
+  setCommandDraft: (value: string) => void;
+  setBusy: (busy: boolean) => void;
+  setModeNormal: () => void;
+  startThinkingIndicator: (note: string) => void;
+  stopThinkingIndicator: () => void;
+  updateSidebar: (note: string) => void;
+  appendSystemMessage: (content: string) => void;
+  appendEntry: (role: "error", content: string) => void;
+  updateComposerHint: () => void;
+  requestRender: () => void;
+  scrollToBottom: (force?: boolean) => void;
+}) {
+  if (options.busy) {
+    options.updateSidebar(
+      "Wait for the current stream or shell command to finish before generating AGENTS.md."
+    );
+    options.requestRender();
+    return;
+  }
+
+  options.setCommandDraft("");
+  options.setBusy(true);
+  options.setModeNormal();
+  options.startThinkingIndicator(`Generating AGENTS.md with ${options.currentModel}...`);
+  options.updateSidebar(`Generating AGENTS.md with ${options.currentModel}...`);
+  options.updateComposerHint();
+  options.requestRender();
+  options.scrollToBottom(true);
+
+  const tools = buildAgentsMdReadonlyTools(options.loadedTools);
+  const conversation: Message[] = [
+    {
+      role: "system",
+      content: [options.initialSystemMessage, buildAgentsMdSystemPrompt()]
+        .filter((part) => part.trim())
+        .join("\n\n"),
+    },
+    ...options.initialToolMessages,
+    {
+      role: "user",
+      content: "Create or update the repository root AGENTS.md by inspecting the repository and then calling `create_agents_context` with the final markdown.",
+    },
+  ];
+
+  let assistantText = "";
+  let finalMarkdown: string | null = null;
+
+  try {
+    const result = streamResponse({
+      model: options.currentModel,
+      messages: conversation,
+      tools,
+    });
+
+    for await (const chunk of result.stream) {
+      switch (chunk.type) {
+        case "reasoning":
+          options.updateSidebar("AGENTS.md sub-agent is reasoning...");
+          break;
+        case "content": {
+          options.stopThinkingIndicator();
+          const nextText = appendChunkWithLimit(assistantText, chunk.content);
+          assistantText = nextText.value;
+          break;
+        }
+        case "tool-call-start":
+          options.stopThinkingIndicator();
+          options.updateSidebar(`AGENTS.md sub-agent requested ${chunk.toolName}...`);
+          break;
+        case "tool-call-delta":
+          options.stopThinkingIndicator();
+          options.updateSidebar(`AGENTS.md sub-agent is preparing ${chunk.toolName} input...`);
+          break;
+        case "tool-result": {
+          options.stopThinkingIndicator();
+          if (chunk.toolName === "create_agents_context") {
+            const parsed = parseAgentsContextResult(chunk.output);
+            if (!parsed) {
+              throw new Error("create_agents_context returned an invalid result.");
+            }
+            finalMarkdown = parsed.markdown;
+          }
+          break;
+        }
+      }
+    }
+
+    const responseMessages = await result.responseMessages;
+    conversation.push(...responseMessages);
+
+    if (!finalMarkdown) {
+      const fallbackText = extractAssistantText(responseMessages).trim() || assistantText.trim();
+      throw new Error(
+        fallbackText
+          ? `AGENTS.md sub-agent finished without calling create_agents_context.\n\nLast assistant output:\n${fallbackText}`
+          : "AGENTS.md sub-agent finished without calling create_agents_context."
+      );
+    }
+
+    await writeAgentsMd(finalMarkdown);
+    options.appendSystemMessage(
+      [
+        `Created or updated \`${path.relative(WORKSPACE_ROOT, ROOT_AGENTS_PATH) || "AGENTS.md"}\`.`,
+        "",
+        "The AGENTS.md sub-agent completed using read-only discovery tools and returned final markdown via `create_agents_context`.",
+      ].join("\n")
+    );
+    options.updateSidebar("AGENTS.md updated.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    options.appendEntry("error", `AGENTS.md generation failed.\n\n${message}`);
+    options.updateSidebar("AGENTS.md generation failed.");
+  } finally {
+    options.stopThinkingIndicator();
+    options.setBusy(false);
+    options.updateComposerHint();
+    options.requestRender();
+    options.scrollToBottom(true);
+  }
 }
 
 export function describeModelOptions(currentModel: string) {

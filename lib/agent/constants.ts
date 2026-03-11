@@ -95,3 +95,27 @@ export const INITIAL_TOOL_SEEDS: InitialToolMessageSeed[] = [
     },
   },
 ];
+
+export const AGENTS_MD_INITIAL_TOOL_SEEDS: InitialToolMessageSeed[] = [
+  {
+    toolCallId: "agents-md-initial-list-project-tree",
+    toolName: "list_project_tree",
+    input: {
+      max_depth: 3,
+    },
+  },
+  {
+    toolCallId: "agents-md-initial-read-file-package-json",
+    toolName: "read_file",
+    input: {
+      path: "package.json",
+    },
+  },
+  {
+    toolCallId: "agents-md-initial-read-file-agents-md",
+    toolName: "read_file",
+    input: {
+      path: "AGENTS.md",
+    },
+  },
+];

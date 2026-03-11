@@ -130,6 +130,10 @@ export type InitialToolMessageSeed = {
   input: Record<string, unknown>;
 };
 
+export type AgentsContextResult = {
+  markdown: string;
+};
+
 export type ShellMessageState = {
   command: string;
   cwdLabel: string;

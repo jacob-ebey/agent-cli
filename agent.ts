@@ -79,6 +79,7 @@ import {
 } from "./lib/agent/approvals.ts";
 import { runShellCommandSession } from "./lib/agent/shell-runner.ts";
 import {
+  loadAgentsMdInitialToolMessages,
   loadInitialToolMessages,
   loadTools,
   summarizeToolResult,
@@ -143,6 +144,7 @@ import {
   describeHelpOptions,
   describeModelOptions,
   resolveRequestedModel,
+  runAgentsMdCommand,
   runIndexCommand as runIndexCommandFlow,
   showPlanCommand,
   summarizeConversationCommand,
@@ -179,7 +181,10 @@ const [initialSystemMessage, loadedTools] = await Promise.all([
   loadInitialSystemMessage(),
   loadTools(),
 ]);
-const initialToolMessages = await loadInitialToolMessages(loadedTools);
+const [initialToolMessages, agentsMdInitialToolMessages] = await Promise.all([
+  loadInitialToolMessages(loadedTools),
+  loadAgentsMdInitialToolMessages(loadedTools),
+]);
 
 const [persistedConfig, approvedShellCommands, persistedInputHistory] =
   await Promise.all([
@@ -1189,6 +1194,29 @@ async function runIndexCommand() {
   });
 }
 
+async function runAgentsMdCommandFlow() {
+  await runAgentsMdCommand({
+    busy,
+    currentModel,
+    loadedTools,
+    initialSystemMessage,
+    initialToolMessages: agentsMdInitialToolMessages,
+    setCommandDraft: (value) => {
+      commandDraft = value;
+    },
+    setBusy,
+    setModeNormal: () => setMode("normal"),
+    startThinkingIndicator,
+    stopThinkingIndicator,
+    updateSidebar,
+    appendSystemMessage,
+    appendEntry: (role, content) => appendEntry(role, content),
+    updateComposerHint,
+    requestRender: () => renderer.requestRender(),
+    scrollToBottom,
+  });
+}
+
 async function runPlanCommand() {
   await showPlanCommand({
     planPath: path.join(WORKSPACE_ROOT, ".agents", "PLAN.md"),
@@ -1223,6 +1251,11 @@ async function executeCommand(raw: string) {
 
   if (command === "help") {
     runHelpCommand();
+    return;
+  }
+
+  if (command === "agents-md") {
+    await runAgentsMdCommandFlow();
     return;
   }
 

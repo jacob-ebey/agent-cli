@@ -2,7 +2,12 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { INITIAL_TOOL_SEEDS, TOOLS_DIRECTORY, WORKSPACE_ROOT } from "./constants.ts";
+import {
+  AGENTS_MD_INITIAL_TOOL_SEEDS,
+  INITIAL_TOOL_SEEDS,
+  TOOLS_DIRECTORY,
+  WORKSPACE_ROOT,
+} from "./constants.ts";
 import type {
   ConversationMessage,
   InitialToolMessageSeed,
@@ -128,20 +133,30 @@ function createInitialToolResultOutput(output: string) {
   };
 }
 
-export async function loadInitialToolMessages(loadedTools: Map<string, LoadedTool>) {
-  const seeds: InitialToolMessageSeed[] = INITIAL_TOOL_SEEDS;
+async function loadSeededToolMessages(options: {
+  loadedTools: Map<string, LoadedTool>;
+  seeds: InitialToolMessageSeed[];
+}) {
   const seededResults = await Promise.all(
-    seeds.map(async (seed) => {
-      const tool = loadedTools.get(seed.toolName);
+    options.seeds.map(async (seed) => {
+      const tool = options.loadedTools.get(seed.toolName);
       if (!tool) {
         return null;
       }
 
-      const output = await tool.execute(seed.input);
-      return {
-        ...seed,
-        output,
-      };
+      try {
+        const output = await tool.execute(seed.input);
+        return {
+          ...seed,
+          output,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          ...seed,
+          output: `Initial tool call failed.\n\n${message}`,
+        };
+      }
     })
   );
   const completedSeeds = seededResults.filter(
@@ -176,6 +191,21 @@ export async function loadInitialToolMessages(loadedTools: Map<string, LoadedToo
       })),
     },
   ] satisfies ConversationMessage[];
+}
+
+export async function loadInitialToolMessages(loadedTools: Map<string, LoadedTool>) {
+  const seeds: InitialToolMessageSeed[] = INITIAL_TOOL_SEEDS;
+  return loadSeededToolMessages({
+    loadedTools,
+    seeds,
+  });
+}
+
+export async function loadAgentsMdInitialToolMessages(loadedTools: Map<string, LoadedTool>) {
+  return loadSeededToolMessages({
+    loadedTools,
+    seeds: AGENTS_MD_INITIAL_TOOL_SEEDS,
+  });
 }
 
 export function summarizeToolResult(
