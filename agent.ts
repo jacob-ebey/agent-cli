@@ -13,9 +13,7 @@ import {
 import {
   generateTextResponse,
   listAvailableModels,
-  streamResponse,
   type Message,
-  type ResponseChunk,
   type Tool,
 } from "./lib/llm.ts";
 import {
@@ -29,8 +27,6 @@ import {
 } from "./lib/agent/constants.ts";
 import type {
   ApprovalDecision,
-  ApprovalPersistence,
-  ApprovalScope,
   AutoScrollState,
   ChatEntry,
   ChatRole,
@@ -51,9 +47,7 @@ import type {
   PersistedTranscriptEntry,
   ShellExecutionResult,
   ShellVisibility,
-  ToolDefinition,
-  ToolExecutor,
-  ToolMetadata,
+  SidebarViewModel,
   UpmergeMenuItem,
 } from "./lib/agent/types.ts";
 import {
@@ -117,6 +111,20 @@ import {
   clearTranscriptEntries,
   restoreTranscriptEntries,
 } from "./lib/agent/transcript-view.ts";
+import {
+  createAssistantStreamState,
+  ensureAssistantStreamEntry,
+  appendAssistantStreamContent,
+  handleResponseChunk,
+  applyFinalAssistantTextIfNeeded,
+  shouldContinueAfterResponse,
+  runSingleAgentTurn,
+} from "./lib/agent/streaming.ts";
+import {
+  createInitialShellExecutionResult,
+  createShellTranscriptEntry,
+  formatShellMessage,
+} from "./lib/agent/shell-session.ts";
 import {
   COMPOSER_MODE_CONFIG,
   ComposerTextarea,
@@ -561,68 +569,6 @@ function describeModelOptions() {
   ].join("\n");
 }
 
-type ShellMessageState = {
-  command: string;
-  cwdLabel: string;
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-  signal: NodeJS.Signals | null;
-  startupError: string | null;
-  stdoutTruncated: boolean;
-  stderrTruncated: boolean;
-  running: boolean;
-  visibility: ShellVisibility;
-};
-
-function formatShellMessage({
-  command,
-  cwdLabel,
-  stdout,
-  stderr,
-  exitCode,
-  signal,
-  startupError,
-  stdoutTruncated,
-  stderrTruncated,
-  running,
-  visibility,
-}: ShellMessageState) {
-  const summaryLine = running
-    ? "Status: running"
-    : startupError
-      ? "Status: failed to start"
-      : signal
-        ? `Status: terminated by ${signal}`
-        : `Status: exited with code ${exitCode ?? 0}`;
-  const visibilityLine =
-    visibility === "agent"
-      ? "Visibility: shared with the agent in conversation history"
-      : "Visibility: local only; hidden from the agent";
-
-  return [
-    "Shell command",
-    command,
-    "",
-    `Cwd: ${cwdLabel}`,
-    visibilityLine,
-    summaryLine,
-    !running && !startupError && signal === null
-      ? `Exit code: ${exitCode ?? 0}`
-      : null,
-    startupError ? `Startup error: ${startupError}` : null,
-    "",
-    "Stdout:",
-    stdout.length ? stdout : "(empty)",
-    stdoutTruncated ? "\n[stdout truncated]\n" : null,
-    "",
-    "Stderr:",
-    stderr.length ? stderr : "(empty)",
-    stderrTruncated ? "\n[stderr truncated]\n" : null,
-  ]
-    .filter((part): part is string => part !== null)
-    .join("\n");
-}
 
 const {
   app,
@@ -1120,19 +1066,7 @@ async function chooseSelectedModel() {
   }
 
   currentModel = selected.id;
-  try {
-    await savePersistedConfig({ currentModel });
-    appendSystemMessage(
-      `Switched model to \`${currentModel}\`. Future sessions will reuse it.`
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    appendEntry(
-      "error",
-      `Switched model to \`${currentModel}\`, but failed to save it for future sessions.\n\n${message}`
-    );
-  }
-
+  await persistCurrentModelSelection();
   closeModelMenu();
   updateSidebar(`Using ${currentModel} for the next prompt.`);
   await persistActiveConversation();
@@ -1270,52 +1204,46 @@ async function settlePendingApproval(decision: ApprovalDecision) {
   });
 }
 
-function updateSidebar(note = "Ready for your next prompt.") {
-  latestSidebarNote = note;
-  const thinkingBadge =
-    busy && activeThinkingIndicator
-      ? ` ${THINKING_FRAMES[thinkingFrameIndex]} thinking`
-      : "";
+function createApprovalSidebarViewModel(note: string): SidebarViewModel {
+  const approvalShortcuts =
+    activeApproval?.approvalPersistence === "persisted"
+      ? [
+          "y      approve once",
+          "a      always approve this command",
+          "n/Esc  deny this command",
+        ]
+      : ["y      approve for session", "n/Esc  deny this edit"];
 
-  if (activeApproval) {
-    const approvalShortcuts =
-      activeApproval.approvalPersistence === "persisted"
-        ? [
-            "y      approve once",
-            "a      always approve this command",
-            "n/Esc  deny this command",
-          ]
-        : ["y      approve for session", "n/Esc  deny this edit"];
-
-    sidebar.title = "Approval";
-    sidebar.borderColor = "#f59e0b";
-    sidebarText.content = [
+  return {
+    title: "Approval",
+    borderColor: "#f59e0b",
+    content: [
       "Status: waiting",
-      `Tool: ${activeApproval.toolName}`,
-      `${activeApproval.displayLabel}: ${activeApproval.displayValue}`,
+      `Tool: ${activeApproval!.toolName}`,
+      `${activeApproval!.displayLabel}: ${activeApproval!.displayValue}`,
       `Queued: ${queuedApprovals.length}`,
       "",
       "Shortcuts",
       ...approvalShortcuts,
       "",
       note,
-    ].join("\n");
-    return;
-  }
+    ].join("\n"),
+  };
+}
 
-  if (upmergeMenuOpen) {
-    const items = currentUpmergeItems();
-    sidebar.title = "Upmerge";
-    sidebar.borderColor = "#22c55e";
-    sidebarText.content = [
+function createUpmergeSidebarViewModel(note: string): SidebarViewModel {
+  const items = currentUpmergeItems();
+  return {
+    title: "Upmerge",
+    borderColor: "#22c55e",
+    content: [
       `Edits: ${upmergeMode}`,
       `Pending: ${upmergeItems.length}`,
       "",
       items.length
         ? items
             .map(
-              (item, index) =>
-                `${index === upmergeSelection ? ">" : " "} ${item.label}`
+              (item, index) => `${index === upmergeSelection ? ">" : " "} ${item.label}`
             )
             .join("\n")
         : "No pending upmerges.",
@@ -1327,14 +1255,15 @@ function updateSidebar(note = "Ready for your next prompt.") {
       "u/Esc  close menu",
       "",
       note,
-    ].join("\n");
-    return;
-  }
+    ].join("\n"),
+  };
+}
 
-  if (historyMenuOpen) {
-    sidebar.title = "History";
-    sidebar.borderColor = "#38bdf8";
-    sidebarText.content = [
+function createHistorySidebarViewModel(note: string): SidebarViewModel {
+  return {
+    title: "History",
+    borderColor: "#38bdf8",
+    content: [
       `Saved chats: ${historyItems.length}`,
       "",
       historyItems.length
@@ -1355,124 +1284,138 @@ function updateSidebar(note = "Ready for your next prompt.") {
       "Esc    close history",
       "",
       note,
-    ].join("\n");
-    return;
-  }
-
-  sidebar.title = "Session";
-  sidebar.borderColor = "#334155";
-  sidebarText.content = [
-    `Status: ${busy ? "streaming" : "idle"}${thinkingBadge}`,
-    `Mode: ${mode}`,
-    `Model: ${currentModel}`,
-    `Messages: ${entries.length}`,
-    `Upmerges: ${upmergeItems.length}`,
-    "",
-    "Shortcuts",
-    "i      insert mode",
-    ":      command mode",
-    "!      shell mode",
-    "@      agent shell mode",
-    "j / k  scroll transcript",
-    "G      jump to live bottom",
-    "u      upmerge menu",
-    "Esc    normal mode",
-    "Ctrl+C abort stream/command",
-    "",
-    "Commands",
-    ":clear reset conversation",
-    ":history browse saved chats",
-    ":index embed skill chunks",
-    ":model open searchable model picker",
-    ":summarize compress chat history",
-    ":quit  exit UI",
-    "",
-    upmergeNote,
-    "",
-    note,
-  ].join("\n");
+    ].join("\n"),
+  };
 }
 
-function updateComposerHint() {
+function createSessionSidebarViewModel(note: string): SidebarViewModel {
+  const thinkingBadge =
+    busy && activeThinkingIndicator
+      ? ` ${THINKING_FRAMES[thinkingFrameIndex]} thinking`
+      : "";
+
+  return {
+    title: "Session",
+    borderColor: "#334155",
+    content: [
+      `Status: ${busy ? "streaming" : "idle"}${thinkingBadge}`,
+      `Mode: ${mode}`,
+      `Model: ${currentModel}`,
+      `Messages: ${entries.length}`,
+      `Upmerges: ${upmergeItems.length}`,
+      "",
+      "Shortcuts",
+      "i      insert mode",
+      ":      command mode",
+      "!      shell mode",
+      "@      agent shell mode",
+      "j / k  scroll transcript",
+      "G      jump to live bottom",
+      "u      upmerge menu",
+      "Esc    normal mode",
+      "Ctrl+C abort stream/command",
+      "",
+      "Commands",
+      ":clear reset conversation",
+      ":history browse saved chats",
+      ":index embed skill chunks",
+      ":model open searchable model picker",
+      ":summarize compress chat history",
+      ":quit  exit UI",
+      "",
+      upmergeNote,
+      "",
+      note,
+    ].join("\n"),
+  };
+}
+
+function createSidebarViewModel(note: string): SidebarViewModel {
   if (activeApproval) {
-    composerHint.content =
-      activeApproval.approvalPersistence === "persisted"
-        ? `Approval required. Press y to allow this command once, a to always allow this exact command, or n to deny.${
-            queuedApprovals.length
-              ? ` ${queuedApprovals.length} more approval request(s) are queued.`
-              : ""
-          }`
-        : `Approval required. Press y to allow this file for the session, or n to deny.${
-            queuedApprovals.length
-              ? ` ${queuedApprovals.length} more approval request(s) are queued.`
-              : ""
-          }`;
-    return;
+    return createApprovalSidebarViewModel(note);
   }
 
   if (upmergeMenuOpen) {
-    composerHint.content =
-      "Upmerge menu open. Enter upmerges the selection, r reverts a selected file, and u/Esc closes it.";
-    return;
+    return createUpmergeSidebarViewModel(note);
   }
 
   if (historyMenuOpen) {
-    composerHint.content =
-      "History browser open. Enter loads the selected conversation, d deletes it, and Esc closes the browser.";
-    return;
+    return createHistorySidebarViewModel(note);
+  }
+
+  return createSessionSidebarViewModel(note);
+}
+
+function createComposerHintContent() {
+  if (activeApproval) {
+    return activeApproval.approvalPersistence === "persisted"
+      ? `Approval required. Press y to allow this command once, a to always allow this exact command, or n to deny.${
+          queuedApprovals.length
+            ? ` ${queuedApprovals.length} more approval request(s) are queued.`
+            : ""
+        }`
+      : `Approval required. Press y to allow this file for the session, or n to deny.${
+          queuedApprovals.length
+            ? ` ${queuedApprovals.length} more approval request(s) are queued.`
+            : ""
+        }`;
+  }
+
+  if (upmergeMenuOpen) {
+    return "Upmerge menu open. Enter upmerges the selection, r reverts a selected file, and u/Esc closes it.";
+  }
+
+  if (historyMenuOpen) {
+    return "History browser open. Enter loads the selected conversation, d deletes it, and Esc closes the browser.";
   }
 
   if (modelMenuOpen) {
-    composerHint.content =
-      "Model picker open. Use j/k to move, . to filter, Enter to select, Backspace to edit the filter, and Esc to close.";
-    return;
+    return "Model picker open. Use j/k to move, . to filter, Enter to select, Backspace to edit the filter, and Esc to close.";
   }
 
   if (busy) {
-    composerHint.content =
-      activeShellProcess
-        ? autoScrollState === "paused"
-          ? "A shell command is running. Auto-scroll is paused while you audit earlier output. Press G to jump back to the live bottom, or Ctrl+C to stop it."
-          : "A shell command is running. Press Ctrl+C to stop it, or use j and k to inspect earlier messages."
-        : autoScrollState === "paused"
-          ? "The agent is responding. Auto-scroll is paused while you audit earlier output. Press G to jump back to the live bottom, or Ctrl+C to abort."
-          : "The agent is responding. Press Ctrl+C to abort, or use j and k to inspect earlier messages.";
-    return;
+    return activeShellProcess
+      ? autoScrollState === "paused"
+        ? "A shell command is running. Auto-scroll is paused while you audit earlier output. Press G to jump back to the live bottom, or Ctrl+C to stop it."
+        : "A shell command is running. Press Ctrl+C to stop it, or use j and k to inspect earlier messages."
+      : autoScrollState === "paused"
+        ? "The agent is responding. Auto-scroll is paused while you audit earlier output. Press G to jump back to the live bottom, or Ctrl+C to abort."
+        : "The agent is responding. Press Ctrl+C to abort, or use j and k to inspect earlier messages.";
   }
 
   if (mode === "normal") {
-    composerHint.content =
-      "Normal mode. Press i to compose, : for commands, !/@ for shell, u for upmerge, or j/k to scroll.";
-    return;
+    return "Normal mode. Press i to compose, : for commands, !/@ for shell, u for upmerge, or j/k to scroll.";
   }
 
   if (mode === "command") {
-    composerHint.content =
-      "Command mode. Run :clear, :history, :index, :model, :summarize, or :quit, or press Esc to return to normal.";
-    return;
+    return "Command mode. Run :clear, :history, :index, :model, :summarize, or :quit, or press Esc to return to normal.";
   }
 
   if (mode === "shell") {
-    composerHint.content =
-      "Shell mode. Press Enter to run a local shell command that stays hidden from the agent.";
-    return;
+    return "Shell mode. Press Enter to run a local shell command that stays hidden from the agent.";
   }
 
   if (mode === "agent_shell") {
-    composerHint.content =
-      "Agent shell mode. Press Enter to run a shell command and add its command and output to the agent conversation.";
-    return;
+    return "Agent shell mode. Press Enter to run a shell command and add its command and output to the agent conversation.";
   }
 
   if (!insertDraft.trim()) {
-    composerHint.content =
-      "Insert mode. Press Enter to send or Shift+Enter to insert a new line.";
-    return;
+    return "Insert mode. Press Enter to send or Shift+Enter to insert a new line.";
   }
 
-  composerHint.content = `Ready to send ${
-    insertDraft.trim().length
-  } characters.`;
+  return `Ready to send ${insertDraft.trim().length} characters.`;
+}
+
+function updateSidebar(note = "Ready for your next prompt.") {
+  latestSidebarNote = note;
+  const sidebarViewModel = createSidebarViewModel(note);
+  sidebar.title = sidebarViewModel.title;
+  sidebar.borderColor = sidebarViewModel.borderColor;
+  sidebarText.content = sidebarViewModel.content;
+}
+
+function updateComposerHint() {
+  composerHint.content = createComposerHintContent();
 }
 
 function appendEntry(
@@ -1593,12 +1536,95 @@ async function shutdown() {
   renderer.destroy();
 }
 
+function exitCommandMode() {
+  commandDraft = "";
+  setMode("normal");
+}
+
+async function persistCurrentModelSelection() {
+  try {
+    await savePersistedConfig({ currentModel });
+    appendSystemMessage(
+      `Switched model to \`${currentModel}\`. Future sessions will reuse it.`
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    appendEntry(
+      "error",
+      `Switched model to \`${currentModel}\`, but failed to save it for future sessions.\n\n${message}`
+    );
+  }
+}
+
+async function openModelPickerFromCommand() {
+  exitCommandMode();
+  await openModelMenu();
+}
+
+async function setModelFromCommand(argument: string) {
+  const requestedModel = resolveModelCommand({
+    input: argument,
+    presets: MODEL_PRESETS,
+  });
+
+  if (!requestedModel) {
+    appendEntry(
+      "error",
+      [`Unknown model target: \`${argument.trim()}\`.`, "", describeModelOptions()].join(
+        "\n"
+      )
+    );
+    exitCommandMode();
+    return;
+  }
+
+  currentModel = requestedModel;
+  await persistCurrentModelSelection();
+  updateSidebar(`Using ${currentModel} for the next prompt.`);
+  exitCommandMode();
+  await persistActiveConversation();
+}
+
+async function openHistoryFromCommand() {
+  exitCommandMode();
+  await openHistoryMenu();
+}
+
+async function runIndexCommand() {
+  commandDraft = "";
+  setBusy(true);
+  setMode("normal");
+  updateSidebar("Indexing skill files with embeddings...");
+
+  try {
+    const index = await indexSkills(WORKSPACE_ROOT);
+    appendSystemMessage(
+      [
+        `Indexed ${index.chunks.length} skill chunk${
+          index.chunks.length === 1 ? "" : "s"
+        }.`,
+        `Skill files: ${new Set(index.chunks.map((chunk) => chunk.path)).size}.`,
+        `Saved embeddings to \`.agents/skills-index.json\`.`,
+        `Embedding model: \`${index.embeddingModel}\`.`,
+      ].join("\n")
+    );
+    updateSidebar("Skill index refreshed.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    appendEntry("error", `Skill indexing failed.\n\n${message}`);
+    updateSidebar("Skill indexing failed.");
+  } finally {
+    setBusy(false);
+    updateComposerHint();
+    renderer.requestRender();
+  }
+}
+
 async function executeCommand(raw: string) {
   const command = raw.trim();
 
   if (!command) {
-    commandDraft = "";
-    setMode("normal");
+    exitCommandMode();
     return;
   }
 
@@ -1608,89 +1634,22 @@ async function executeCommand(raw: string) {
   }
 
   if (command === "model") {
-    commandDraft = "";
-    setMode("normal");
-    await openModelMenu();
+    await openModelPickerFromCommand();
     return;
   }
 
   if (command.startsWith("model ")) {
-    const requestedModel = resolveModelCommand({
-      input: command.slice("model".length),
-      presets: MODEL_PRESETS,
-    });
-
-    if (!requestedModel) {
-      appendEntry(
-        "error",
-        [
-          `Unknown model target: \`${command.slice("model".length).trim()}\`.`,
-          "",
-          describeModelOptions(),
-        ].join("\n")
-      );
-      commandDraft = "";
-      setMode("normal");
-      return;
-    }
-
-    currentModel = requestedModel;
-    try {
-      await savePersistedConfig({ currentModel });
-      appendSystemMessage(
-        `Switched model to \`${currentModel}\`. Future sessions will reuse it.`
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      appendEntry(
-        "error",
-        `Switched model to \`${currentModel}\`, but failed to save it for future sessions.\n\n${message}`
-      );
-    }
-    updateSidebar(`Using ${currentModel} for the next prompt.`);
-    commandDraft = "";
-    setMode("normal");
-    await persistActiveConversation();
+    await setModelFromCommand(command.slice("model".length));
     return;
   }
 
   if (command === "history" || command === "h") {
-    commandDraft = "";
-    setMode("normal");
-    await openHistoryMenu();
+    await openHistoryFromCommand();
     return;
   }
 
   if (command === "index") {
-    commandDraft = "";
-    setBusy(true);
-    setMode("normal");
-    updateSidebar("Indexing skill files with embeddings...");
-
-    try {
-      const index = await indexSkills(WORKSPACE_ROOT);
-      appendSystemMessage(
-        [
-          `Indexed ${index.chunks.length} skill chunk${
-            index.chunks.length === 1 ? "" : "s"
-          }.`,
-          `Skill files: ${
-            new Set(index.chunks.map((chunk) => chunk.path)).size
-          }.`,
-          `Saved embeddings to \`.agents/skills-index.json\`.`,
-          `Embedding model: \`${index.embeddingModel}\`.`,
-        ].join("\n")
-      );
-      updateSidebar("Skill index refreshed.");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      appendEntry("error", `Skill indexing failed.\n\n${message}`);
-      updateSidebar("Skill indexing failed.");
-    } finally {
-      setBusy(false);
-      updateComposerHint();
-      renderer.requestRender();
-    }
+    await runIndexCommand();
     return;
   }
 
@@ -1705,77 +1664,7 @@ async function executeCommand(raw: string) {
   }
 
   updateSidebar(`Unknown command: :${command}`);
-  commandDraft = "";
-  setMode("normal");
-}
-
-function createInitialShellExecutionResult(): ShellExecutionResult {
-  return {
-    stdout: "",
-    stderr: "",
-    exitCode: null,
-    signal: null,
-    startupError: null,
-    stdoutTruncated: false,
-    stderrTruncated: false,
-  };
-}
-
-function createShellMessageState(
-  command: string,
-  visibility: ShellVisibility,
-  result: ShellExecutionResult,
-  running: boolean,
-  cwdLabel = "."
-): ShellMessageState {
-  return {
-    command,
-    cwdLabel,
-    stdout: result.stdout,
-    stderr: result.stderr,
-    exitCode: result.exitCode,
-    signal: result.signal,
-    startupError: result.startupError,
-    stdoutTruncated: result.stdoutTruncated,
-    stderrTruncated: result.stderrTruncated,
-    running,
-    visibility,
-  };
-}
-
-function createShellTranscriptEntry(command: string, visibility: ShellVisibility) {
-  let shellResult = createInitialShellExecutionResult();
-  const initialState = createShellMessageState(command, visibility, shellResult, true);
-  const transcriptIndex =
-    transcriptHistory.push({
-      role: "system",
-      content: formatShellMessage(initialState),
-    }) - 1;
-
-  const entry = appendEntry("system", formatShellMessage(initialState), {
-    recordInTranscript: false,
-  });
-
-  return {
-    update(result: ShellExecutionResult, running: boolean) {
-      shellResult = result;
-      const content = formatShellMessage(
-        createShellMessageState(command, visibility, shellResult, running)
-      );
-      entry.body.content = content || " ";
-      transcriptHistory[transcriptIndex] = {
-        role: "system",
-        content,
-      };
-      renderer.requestRender();
-      scrollToBottom();
-    },
-    snapshot(running: boolean) {
-      return formatShellMessage(
-        createShellMessageState(command, visibility, shellResult, running)
-      );
-    },
-  };
+  exitCommandMode();
 }
 
 async function executeShellInput(raw: string, visibility: ShellVisibility) {
@@ -1786,7 +1675,14 @@ async function executeShellInput(raw: string, visibility: ShellVisibility) {
   }
 
   let shellResult = createInitialShellExecutionResult();
-  const shellEntry = createShellTranscriptEntry(command, visibility);
+  const shellEntry = createShellTranscriptEntry({
+    command,
+    visibility,
+    transcriptHistory,
+    appendEntry: (role, content, options) => appendEntry(role, content, options),
+    requestRender: () => renderer.requestRender(),
+    scrollToBottom: () => scrollToBottom(),
+  });
 
   setBusy(true);
   updateComposerHint();
@@ -1827,6 +1723,103 @@ async function executeShellInput(raw: string, visibility: ShellVisibility) {
         : "Shell command complete."
     );
     renderer.requestRender();
+  }
+}
+
+async function runAgentLoop() {
+  let streamAborted = false;
+
+  try {
+    let shouldContinueAgentLoop = true;
+
+    while (shouldContinueAgentLoop && !streamAborted) {
+      const turnResult = await runSingleAgentTurn({
+        model: currentModel,
+        conversation,
+        tools,
+        createAbortController: () => new AbortController(),
+        onAbortControllerCreated: (controller) => {
+          activeStreamAbortController = controller;
+        },
+        onAbortControllerCleared: (controller) => {
+          if (activeStreamAbortController === controller) {
+            activeStreamAbortController = null;
+          }
+        },
+        createState: createAssistantStreamState,
+        onChunk: (chunk, state) =>
+          handleResponseChunk({
+            chunk,
+            state,
+            startThinkingIndicator,
+            activeThinking: activeThinkingIndicator !== null,
+            stopThinkingIndicator,
+            updateSidebar,
+            appendAssistantContent: (contentChunk) =>
+              appendAssistantStreamContent({
+                state,
+                contentChunk,
+                transcriptHistory,
+                ensureEntry: () =>
+                  ensureAssistantStreamEntry({
+                    state,
+                    appendEntry: (role, content, options) =>
+                      appendEntry(role, content, options),
+                    transcriptHistory,
+                  }),
+                stopThinkingIndicator,
+                requestRender: () => renderer.requestRender(),
+                scrollToBottom: () => scrollToBottom(),
+              }),
+            appendSystemMessage,
+            summarizeToolResult,
+            refreshUpmergeState,
+          }),
+        onResponseMessages: async (responseMessages, state) => {
+          applyFinalAssistantTextIfNeeded({
+            state,
+            responseMessages,
+            appendEntry: (role, content) => appendEntry(role, content),
+          });
+          await persistActiveConversation();
+          return shouldContinueAfterResponse(state, responseMessages, (role, content) =>
+            appendEntry(role, content)
+          );
+        },
+        onAborted: () => {
+          updateSidebar("Streaming aborted.");
+        },
+      });
+      shouldContinueAgentLoop = turnResult.shouldContinue;
+      streamAborted = turnResult.aborted;
+    }
+
+    if (!streamAborted) {
+      updateSidebar("Streaming complete.");
+    }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      streamAborted = true;
+      updateSidebar("Streaming aborted.");
+      return;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    appendEntry("error", `Request failed.\n\n${message}`);
+    updateSidebar(
+      "Request failed. Check your model selection and AI provider credentials."
+    );
+    await persistActiveConversation();
+  } finally {
+    setBusy(false);
+    updateComposerHint();
+    updateSidebar(
+      streamAborted
+        ? "Stream aborted. Ready for your next prompt."
+        : "Ready for your next prompt."
+    );
+    renderer.requestRender();
+    scrollToBottom();
   }
 }
 
@@ -1881,160 +1874,7 @@ async function submitPrompt() {
   setMode("normal");
   startThinkingIndicator(`Connecting to ${currentModel}...`);
   updateSidebar(`Connecting to ${currentModel}...`);
-  let streamAborted = false;
-
-  try {
-    let shouldContinueAgentLoop = true;
-
-    while (shouldContinueAgentLoop && !streamAborted) {
-      let sawAssistantOutput = false;
-      let sawToolActivity = false;
-      const streamAbortController = new AbortController();
-      activeStreamAbortController = streamAbortController;
-
-      let assistantEntry: ChatEntry | null = null;
-      let assistantContent = "";
-      let assistantTranscriptIndex: number | null = null;
-
-      try {
-        const result = streamResponse({
-          model: currentModel,
-          messages: conversation,
-          tools,
-          abortSignal: streamAbortController.signal,
-        });
-
-        for await (const chunk of result.stream) {
-          switch (chunk.type) {
-            case "reasoning":
-              if (!activeThinkingIndicator) {
-                startThinkingIndicator("Model is reasoning...");
-              }
-              updateSidebar("Model is reasoning...");
-              break;
-            case "content":
-              stopThinkingIndicator();
-              if (!assistantEntry) {
-                assistantEntry = appendEntry("assistant", "", {
-                  recordInTranscript: false,
-                });
-                assistantTranscriptIndex =
-                  transcriptHistory.push({
-                    role: "assistant",
-                    content: "",
-                  }) - 1;
-              }
-              assistantContent += chunk.content;
-              assistantEntry.body.content = assistantContent || " ";
-              if (assistantTranscriptIndex !== null) {
-                transcriptHistory[assistantTranscriptIndex] = {
-                  role: "assistant",
-                  content: assistantContent,
-                };
-              }
-              sawAssistantOutput = true;
-              renderer.requestRender();
-              scrollToBottom();
-              break;
-            case "tool-call-start":
-              sawToolActivity = true;
-              stopThinkingIndicator();
-              updateSidebar(`Tool requested: ${chunk.toolName}`);
-              break;
-            case "tool-call-delta":
-              sawToolActivity = true;
-              stopThinkingIndicator();
-              updateSidebar(`Preparing tool input: ${chunk.toolName}`);
-              break;
-            case "tool-result":
-              sawToolActivity = true;
-              stopThinkingIndicator();
-              appendSystemMessage(
-                summarizeToolResult(chunk.toolName, chunk.input, chunk.output) ??
-                  [
-                    `Tool \`${chunk.toolName}\` completed.`,
-                    "",
-                    formatToolOutput(chunk.output),
-                  ].join("\n")
-              );
-              await refreshUpmergeState();
-              updateSidebar(`Tool completed: ${chunk.toolName}`);
-              break;
-          }
-        }
-
-        const responseMessages = await result.responseMessages;
-        conversation.push(...responseMessages);
-
-        if (!assistantContent.trim() && !sawAssistantOutput) {
-          const finalAssistantText = extractAssistantText(responseMessages);
-          if (finalAssistantText.trim()) {
-            appendEntry("assistant", finalAssistantText);
-            sawAssistantOutput = true;
-            assistantContent = finalAssistantText;
-          }
-        }
-        await persistActiveConversation();
-
-        if (
-          !assistantContent.trim() &&
-          !sawAssistantOutput &&
-          !sawToolActivity &&
-          !lastAssistantResponseContainsToolCall(responseMessages)
-        ) {
-          appendEntry(
-            "assistant",
-            "The model returned an empty response. Try another prompt."
-          );
-          shouldContinueAgentLoop = false;
-        } else {
-          shouldContinueAgentLoop =
-            lastAssistantResponseContainsToolCall(responseMessages);
-        }
-      } catch (error) {
-        if (
-          streamAbortController.signal.aborted ||
-          (error instanceof DOMException && error.name === "AbortError")
-        ) {
-          streamAborted = true;
-          updateSidebar("Streaming aborted.");
-        } else {
-          throw error;
-        }
-      } finally {
-        if (activeStreamAbortController === streamAbortController) {
-          activeStreamAbortController = null;
-        }
-      }
-    }
-
-    if (!streamAborted) {
-      updateSidebar("Streaming complete.");
-    }
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
-      streamAborted = true;
-      updateSidebar("Streaming aborted.");
-      return;
-    }
-
-    const message = error instanceof Error ? error.message : String(error);
-    appendEntry("error", `Request failed.\n\n${message}`);
-    updateSidebar(
-      "Request failed. Check your model selection and AI provider credentials."
-    );
-    await persistActiveConversation();
-  } finally {
-    setBusy(false);
-    updateComposerHint();
-    updateSidebar(
-      streamAborted
-        ? "Stream aborted. Ready for your next prompt."
-        : "Ready for your next prompt."
-    );
-    renderer.requestRender();
-    scrollToBottom();
-  }
+  await runAgentLoop();
 }
 
 function isColonKey(key: KeyEvent) {

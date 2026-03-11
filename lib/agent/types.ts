@@ -129,3 +129,31 @@ export type InitialToolMessageSeed = {
   toolName: string;
   input: Record<string, unknown>;
 };
+
+export type ShellMessageState = {
+  command: string;
+  cwdLabel: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  startupError: string | null;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+  running: boolean;
+  visibility: ShellVisibility;
+};
+
+export type AssistantStreamState = {
+  entry: ChatEntry | null;
+  content: string;
+  transcriptIndex: number | null;
+  sawOutput: boolean;
+  sawToolActivity: boolean;
+};
+
+export type SidebarViewModel = {
+  title: string;
+  borderColor: string;
+  content: string;
+};
