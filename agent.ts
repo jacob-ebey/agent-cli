@@ -46,23 +46,12 @@ import type {
 } from "./lib/agent/types.ts";
 import {
   appendChunkWithLimit,
-  buildConversationPreview,
   extractAssistantText,
-  formatConversationTimestamp,
   formatToolOutput,
   isRecord,
   lastAssistantResponseContainsToolCall,
   readStringArgument,
 } from "./lib/agent/utils.ts";
-import {
-  buildModelMenuContent,
-  computeModelViewportTop,
-  filterModelItems,
-  moveModelSelection as moveModelSelectionIndex,
-  normalizeModelSelection,
-  resolveModelCommand,
-  selectedModelItem as getSelectedModelItem,
-} from "./lib/agent/model-menu.ts";
 import {
   ensurePlanFileReady,
   loadInitialSystemMessage,
@@ -80,13 +69,7 @@ import {
   savePersistedConversationState,
   summarizeConversationTitleFromTranscript,
 } from "./lib/agent/conversation-store.ts";
-import {
-  loadInputHistory,
-  navigateHistory,
-  recordHistoryEntry,
-  saveInputHistory,
-  syncHistoryDraft,
-} from "./lib/agent/input-history.ts";
+import { loadInputHistory } from "./lib/agent/input-history.ts";
 import {
   clearApprovalQueueState,
   currentApprovalPrompt,
@@ -130,17 +113,41 @@ import {
   createComposerHintContent,
   createSidebarViewModel,
 } from "./lib/agent/view-models.ts";
+import { hasMeaningfulTranscript } from "./lib/agent/summarize.ts";
 import {
-  buildConversationSummaryPrompt,
-  createSummarizedConversationState,
-  hasMeaningfulTranscript,
-} from "./lib/agent/summarize.ts";
-import { indexSkills } from "./lib/skills-index.ts";
+  buildHistoryPreview,
+  buildModelMenuView,
+  currentUpmergeItems,
+  loadModelMenuState,
+  moveModelMenuSelection,
+  refreshFilteredModelItems,
+  refreshHistoryState as loadHistoryState,
+  refreshUpmergePreview as loadUpmergePreview,
+  refreshUpmergeState as loadUpmergeState,
+  runUpmergeSelection as runUpmergeSelectionAction,
+  selectedHistoryItem,
+  selectedModelMenuItem,
+} from "./lib/agent/menus.ts";
+import {
+  isAgentShellKey,
+  isColonKey,
+  isHistoryMode,
+  isShellKey,
+  modeToHistoryMode,
+  moveComposerCursorToEnd,
+  navigateHistoryInComposer,
+  recordAndPersistHistoryEntry,
+  syncComposerDraft,
+} from "./lib/agent/input-controller.ts";
+import {
+  describeModelOptions,
+  resolveRequestedModel,
+  runIndexCommand as runIndexCommandFlow,
+  summarizeConversationCommand,
+} from "./lib/agent/commands.ts";
 import {
   captureWorkspaceSession,
   cleanupWorkspaceSession,
-  getUpmergePreview,
-  getUpmergeStatus,
   prepareWorkspaceForEdit,
   relativeOriginalWorkspacePath,
   revertRelativePath,
@@ -370,73 +377,30 @@ function startThinkingIndicator(baseNote = latestSidebarNote) {
 
 
 async function summarizeActiveConversation() {
-  if (busy) {
-    updateSidebar("Wait for the current stream or shell command to finish before summarizing.");
-    renderer.requestRender();
-    return;
-  }
-
-  if (!hasMeaningfulTranscript(transcriptHistory)) {
-    appendSystemMessage("Nothing to summarize yet.");
-    commandDraft = "";
-    setMode("normal");
-    return;
-  }
-
-  commandDraft = "";
-  setBusy(true);
-  setMode("normal");
-  startThinkingIndicator(`Summarizing conversation with ${currentModel}...`);
-  updateSidebar(`Summarizing conversation with ${currentModel}...`);
-
-  try {
-    const summary = await generateTextResponse({
-      model: currentModel,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You compress chat history for an agent. Preserve only non-recoverable context needed to continue the task well. Be concise and reliable.",
-        },
-        {
-          role: "user",
-          content: buildConversationSummaryPrompt(transcriptHistory),
-        },
-      ],
-    });
-
-    if (!summary) {
-      appendEntry(
-        "error",
-        "Conversation summarization returned an empty response. The existing chat history was left unchanged."
-      );
-      updateSidebar("Conversation summarization returned an empty response.");
-      return;
-    }
-
-    const preservedState = createSummarizedConversationState({
-      summary,
-      createInitialConversationMessages,
-    });
-
-    conversation.splice(0, conversation.length, ...preservedState.conversation);
-    transcriptHistory.splice(0, transcriptHistory.length, ...preservedState.transcript);
-    restoreTranscriptFromHistory();
-    await persistActiveConversation();
-    updateSidebar("Conversation summarized and compressed.");
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    appendEntry(
-      "error",
-      `Conversation summarization failed. Existing history was left unchanged.\n\n${message}`
-    );
-    updateSidebar("Conversation summarization failed.");
-  } finally {
-    setBusy(false);
-    updateComposerHint();
-    renderer.requestRender();
-    scrollToBottom(true);
-  }
+  await summarizeConversationCommand({
+    busy,
+    currentModel,
+    transcriptHistory,
+    setCommandDraft: (value) => {
+      commandDraft = value;
+    },
+    setBusy,
+    setModeNormal: () => setMode("normal"),
+    startThinkingIndicator,
+    updateSidebar,
+    appendSystemMessage,
+    appendEntry: (role, content) => appendEntry(role, content),
+    restoreTranscriptFromHistory,
+    persistActiveConversation,
+    updateComposerHint,
+    requestRender: () => renderer.requestRender(),
+    scrollToBottom,
+    replaceWithSummarizedState: (state) => {
+      conversation.splice(0, conversation.length, ...state.conversation);
+      transcriptHistory.splice(0, transcriptHistory.length, ...state.transcript);
+    },
+    createInitialConversationMessages,
+  });
 }
 
 function configureConversationWorkspace(conversationId: string) {
@@ -501,23 +465,6 @@ function nextId(prefix: string) {
   return `${prefix}-${nextIdCounter}`;
 }
 
-function describeModelOptions() {
-  const presetLines = (
-    Object.entries(MODEL_PRESETS) as Array<[ModelPresetName, string]>
-  ).map(([name, modelId]) => `:model ${name.padEnd(10, " ")} ${modelId}`);
-
-  return [
-    `Current model: \`${currentModel}\``,
-    "",
-    "Presets",
-    ...presetLines,
-    "",
-    "You can also run `:model your-model-id` to set any Shopify gateway model directly.",
-    "Use `:model ollama:your-local-model` to target a local Ollama model.",
-  ].join("\n");
-}
-
-
 const {
   app,
   main,
@@ -543,18 +490,6 @@ renderer.root.add(app);
 
 function setComposerText(value: string) {
   input.setText(value);
-}
-
-function modeToHistoryMode(currentMode: Mode): HistoryMode | null {
-  if (currentMode === "normal") {
-    return null;
-  }
-
-  return currentMode;
-}
-
-function isHistoryMode(currentMode: Mode): currentMode is HistoryMode {
-  return currentMode !== "normal";
 }
 
 function currentDraftForMode(currentMode: HistoryMode) {
@@ -592,120 +527,34 @@ function setDraftForMode(currentMode: HistoryMode, value: string) {
   insertDraft = value;
 }
 
-async function persistInputHistory() {
-  try {
-    await saveInputHistory(inputHistory);
-  } catch (error) {
-    console.warn(`Failed to save input history to ${INPUT_HISTORY_PATH}:`, error);
-  }
-}
-
-async function recordAndPersistHistoryEntry(currentMode: HistoryMode, rawValue: string) {
-  const changed = recordHistoryEntry({
-    currentMode,
-    rawValue,
-    inputHistory,
-    historyCursor,
-    historyDrafts,
-  });
-
-  if (changed) {
-    await persistInputHistory();
-  }
-}
-
-function navigateHistoryInComposer(currentMode: HistoryMode, delta: -1 | 1) {
-  const nextValue = navigateHistory({
-    currentMode,
-    delta,
-    inputHistory,
-    historyCursor,
-    historyDrafts,
-    currentDraftForMode,
-    setDraftForMode,
-  });
-
-  if (nextValue === null) {
-    return false;
-  }
-
-  setComposerText(nextValue);
-  moveComposerCursorToEnd(nextValue);
-  updateComposerHint();
-  renderer.requestRender();
-  return true;
-}
-
-function moveComposerCursorToEnd(value: string) {
-  const desiredLength = value.length;
-
-  process.nextTick(() => {
-    const currentValue = input.plainText;
-    const currentLength = currentValue.length;
-
-    if (currentLength <= desiredLength) {
-      return;
-    }
-
-    for (let index = 0; index < currentLength - desiredLength; index += 1) {
-      input.handleKeyPress({
-        name: "left",
-        sequence: "",
-        ctrl: false,
-        meta: false,
-        shift: false,
-      } as KeyEvent);
-    }
-  });
-}
-
-function currentUpmergeItems() {
-  if (!upmergeItems.length) {
-    return [];
-  }
-
-  return [{ label: "Upmerge all pending files", path: null }, ...upmergeItems];
-}
-
-function selectedUpmergeItem() {
-  const items = currentUpmergeItems();
-  if (!items.length) {
-    return null;
-  }
-
-  return items[Math.min(upmergeSelection, items.length - 1)] ?? null;
-}
 
 async function refreshUpmergePreview() {
-  if (!upmergeMenuOpen) {
+  const preview = await loadUpmergePreview({
+    upmergeMenuOpen,
+    upmergeItems,
+    upmergeSelection,
+  });
+
+  if (preview === null) {
     return;
   }
 
-  const selected = selectedUpmergeItem();
-  upmergePreviewText.content = await getUpmergePreview(
-    selected?.path ?? undefined
-  );
+  upmergePreviewText.content = preview;
   renderer.requestRender();
 }
 
 async function refreshUpmergeState() {
-  const status = await getUpmergeStatus();
-  upmergeMode = status.mode;
-  upmergeNote = status.note;
-  upmergeItems = status.pendingFiles.map((entry) => ({
-    label: entry,
-    path: entry,
-  }));
+  const state = await loadUpmergeState({
+    upmergeMenuOpen,
+    upmergeSelection,
+  });
+  upmergeMode = state.upmergeMode;
+  upmergeNote = state.upmergeNote;
+  upmergeItems = state.upmergeItems;
+  upmergeSelection = state.upmergeSelection;
 
-  const items = currentUpmergeItems();
-  if (!items.length) {
-    upmergeSelection = 0;
-  } else if (upmergeSelection >= items.length) {
-    upmergeSelection = items.length - 1;
-  }
-
-  if (upmergeMenuOpen) {
-    await refreshUpmergePreview();
+  if (state.preview !== null) {
+    upmergePreviewText.content = state.preview;
   }
 
   updateSidebar();
@@ -757,7 +606,7 @@ async function openUpmergeMenu() {
 }
 
 async function moveUpmergeSelection(delta: number) {
-  const items = currentUpmergeItems();
+  const items = currentUpmergeItems(upmergeItems);
   if (!items.length) {
     return;
   }
@@ -768,27 +617,26 @@ async function moveUpmergeSelection(delta: number) {
 }
 
 async function runUpmergeSelection(action: "upmerge" | "revert") {
-  const selected = selectedUpmergeItem();
-  if (!selected) {
-    updateSidebar("No pending upmerges.");
-    renderer.requestRender();
-    return;
-  }
-
-  if (action === "revert" && selected.path === null) {
-    updateSidebar("Select a file to revert it.");
-    renderer.requestRender();
-    return;
-  }
-
   try {
-    const message =
-      action === "upmerge"
-        ? selected.path === null
-          ? await upmergeAll()
-          : await upmergeRelativePath(selected.path)
-        : await revertRelativePath(selected.path!);
-    appendSystemMessage(message);
+    const result = await runUpmergeSelectionAction({
+      upmergeItems,
+      upmergeSelection,
+      action,
+    });
+
+    if (result.kind === "empty") {
+      updateSidebar("No pending upmerges.");
+      renderer.requestRender();
+      return;
+    }
+
+    if (result.kind === "invalid-revert-all") {
+      updateSidebar("Select a file to revert it.");
+      renderer.requestRender();
+      return;
+    }
+
+    appendSystemMessage(result.message);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     appendEntry("error", message);
@@ -797,39 +645,24 @@ async function runUpmergeSelection(action: "upmerge" | "revert") {
   await refreshUpmergeState();
 }
 
-function selectedHistoryItem() {
-  if (!historyItems.length) {
-    return null;
-  }
-
-  return historyItems[Math.min(historySelection, historyItems.length - 1)] ?? null;
-}
-
 async function refreshHistoryPreview() {
-  const selected = selectedHistoryItem();
-  historyPreviewText.content = selected
-    ? [
-        selected.title,
-        "",
-        `Saved: ${formatConversationTimestamp(selected.updatedAt)}`,
-        `Started: ${formatConversationTimestamp(selected.createdAt)}`,
-        "",
-        buildConversationPreview(selected.transcript),
-      ].join("\n")
-    : "No saved conversations.";
+  historyPreviewText.content = buildHistoryPreview({
+    historyItems,
+    historySelection,
+  });
   renderer.requestRender();
 }
 
 async function refreshHistoryState() {
-  historyItems = await loadConversationHistory();
-  if (!historyItems.length) {
-    historySelection = 0;
-  } else if (historySelection >= historyItems.length) {
-    historySelection = historyItems.length - 1;
-  }
+  const state = await loadHistoryState({
+    historyMenuOpen,
+    historySelection,
+  });
+  historyItems = state.historyItems;
+  historySelection = state.historySelection;
 
-  if (historyMenuOpen) {
-    await refreshHistoryPreview();
+  if (state.preview !== null) {
+    historyPreviewText.content = state.preview;
   }
 
   updateSidebar();
@@ -867,44 +700,32 @@ async function moveHistorySelection(delta: number) {
   updateSidebar();
 }
 
-function selectedModelItem() {
-  return getSelectedModelItem({
-    filteredItems: filteredModelMenuItems,
-    modelSelection,
-  });
-}
-
-function ensureModelSelectionVisible() {
-  const nextTop = computeModelViewportTop({
-    currentScrollTop: modelPreview.scrollTop,
-    viewportHeight: modelPreview.viewport.height,
-    modelSelection,
-    filteredItems: filteredModelMenuItems,
-  });
-
-  modelPreview.scrollTo({ x: 0, y: nextTop });
-}
 
 function updateModelMenuContent(note?: string) {
-  modelPreviewText.content = buildModelMenuContent({
+  const view = buildModelMenuView({
     currentModel,
     modelFilter,
-    filteredItems: filteredModelMenuItems,
-    allItems: modelMenuItems,
+    filteredModelMenuItems,
+    modelMenuItems,
     modelSelection,
     modelMenuErrors,
     note,
-  }).join("\n");
-  ensureModelSelectionVisible();
+    currentScrollTop: modelPreview.scrollTop,
+    viewportHeight: modelPreview.viewport.height,
+  });
+  modelPreviewText.content = view.content;
+  modelPreview.scrollTo({ x: 0, y: view.scrollTop });
   renderer.requestRender();
 }
 
-function refreshFilteredModelItems() {
-  filteredModelMenuItems = filterModelItems(modelMenuItems, modelFilter);
-  modelSelection = normalizeModelSelection({
-    filteredItems: filteredModelMenuItems,
+function refreshModelFilterState() {
+  const state = refreshFilteredModelItems({
+    modelMenuItems,
+    modelFilter,
     modelSelection,
   });
+  filteredModelMenuItems = state.filteredModelMenuItems;
+  modelSelection = state.modelSelection;
 }
 
 function closeModelMenu() {
@@ -933,15 +754,10 @@ async function openModelMenu() {
   updateModelMenuContent("Loading available models...");
 
   try {
-    const result = await listAvailableModels();
-    modelMenuItems = result.models.map((model) => ({
-      id: model.id,
-      label: model.label,
-      description: model.description,
-      provider: model.provider,
-    }));
-    modelMenuErrors = result.errors;
-    refreshFilteredModelItems();
+    const result = await loadModelMenuState();
+    modelMenuItems = result.modelMenuItems;
+    modelMenuErrors = result.modelMenuErrors;
+    refreshModelFilterState();
     updateSidebar("Model picker ready.");
     updateModelMenuContent();
   } catch (error) {
@@ -953,12 +769,8 @@ async function openModelMenu() {
 }
 
 function moveModelSelection(delta: number) {
-  if (!filteredModelMenuItems.length) {
-    return;
-  }
-
-  modelSelection = moveModelSelectionIndex({
-    filteredItems: filteredModelMenuItems,
+  modelSelection = moveModelMenuSelection({
+    filteredModelMenuItems,
     modelSelection,
     delta,
   });
@@ -972,7 +784,7 @@ function backspaceModelFilter() {
   }
 
   modelFilter = modelFilter.slice(0, -1);
-  refreshFilteredModelItems();
+  refreshModelFilterState();
   updateSidebar();
   updateModelMenuContent();
 }
@@ -983,13 +795,13 @@ function appendModelFilter(text: string) {
   }
 
   modelFilter += text;
-  refreshFilteredModelItems();
+  refreshModelFilterState();
   updateSidebar();
   updateModelMenuContent();
 }
 
 async function chooseSelectedModel() {
-  const selected = selectedModelItem();
+  const selected = selectedModelMenuItem({ filteredModelMenuItems, modelSelection });
   if (!selected) {
     updateSidebar("No model selected.");
     updateModelMenuContent("No model selected.");
@@ -1004,7 +816,7 @@ async function chooseSelectedModel() {
 }
 
 async function loadSelectedHistoryConversation() {
-  const selected = selectedHistoryItem();
+  const selected = selectedHistoryItem({ historyItems, historySelection });
   if (!selected) {
     updateSidebar("No saved conversations to load.");
     renderer.requestRender();
@@ -1025,7 +837,7 @@ async function loadSelectedHistoryConversation() {
 }
 
 async function deleteSelectedHistoryConversation() {
-  const selected = selectedHistoryItem();
+  const selected = selectedHistoryItem({ historyItems, historySelection });
   if (!selected) {
     updateSidebar("No saved conversations to delete.");
     renderer.requestRender();
@@ -1057,7 +869,7 @@ function focusComposerWithDraft(nextMode: Exclude<Mode, "normal">, draft: string
   process.nextTick(() => {
     if (mode === nextMode) {
       input.focus();
-      moveComposerCursorToEnd(draft);
+      moveComposerCursorToEnd({ input, value: draft });
       renderer.requestRender();
     }
   });
@@ -1319,15 +1131,12 @@ async function openModelPickerFromCommand() {
 }
 
 async function setModelFromCommand(argument: string) {
-  const requestedModel = resolveModelCommand({
-    input: argument,
-    presets: MODEL_PRESETS,
-  });
+  const requestedModel = resolveRequestedModel(argument);
 
   if (!requestedModel) {
     appendEntry(
       "error",
-      [`Unknown model target: \`${argument.trim()}\`.`, "", describeModelOptions()].join(
+      [`Unknown model target: \`${argument.trim()}\`.`, "", describeModelOptions(currentModel)].join(
         "\n"
       )
     );
@@ -1348,33 +1157,18 @@ async function openHistoryFromCommand() {
 }
 
 async function runIndexCommand() {
-  commandDraft = "";
-  setBusy(true);
-  setMode("normal");
-  updateSidebar("Indexing skill files with embeddings...");
-
-  try {
-    const index = await indexSkills(WORKSPACE_ROOT);
-    appendSystemMessage(
-      [
-        `Indexed ${index.chunks.length} skill chunk${
-          index.chunks.length === 1 ? "" : "s"
-        }.`,
-        `Skill files: ${new Set(index.chunks.map((chunk) => chunk.path)).size}.`,
-        `Saved embeddings to \`.agents/skills-index.json\`.`,
-        `Embedding model: \`${index.embeddingModel}\`.`,
-      ].join("\n")
-    );
-    updateSidebar("Skill index refreshed.");
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    appendEntry("error", `Skill indexing failed.\n\n${message}`);
-    updateSidebar("Skill indexing failed.");
-  } finally {
-    setBusy(false);
-    updateComposerHint();
-    renderer.requestRender();
-  }
+  await runIndexCommandFlow({
+    setCommandDraft: (value) => {
+      commandDraft = value;
+    },
+    setBusy,
+    setModeNormal: () => setMode("normal"),
+    updateSidebar,
+    appendSystemMessage,
+    appendEntry: (role, content) => appendEntry(role, content),
+    updateComposerHint,
+    requestRender: () => renderer.requestRender(),
+  });
 }
 
 async function executeCommand(raw: string) {
@@ -1584,14 +1378,28 @@ async function submitPrompt() {
   if (busy) return;
 
   if (mode === "command") {
-    await recordAndPersistHistoryEntry("command", commandDraft);
+    await recordAndPersistHistoryEntry({
+      currentMode: "command",
+      rawValue: commandDraft,
+      inputHistory,
+      historyCursor,
+      historyDrafts,
+      inputHistoryPath: INPUT_HISTORY_PATH,
+    });
     await executeCommand(commandDraft);
     return;
   }
 
   if (mode === "shell") {
     const command = shellDraft.trim();
-    await recordAndPersistHistoryEntry("shell", shellDraft);
+    await recordAndPersistHistoryEntry({
+      currentMode: "shell",
+      rawValue: shellDraft,
+      inputHistory,
+      historyCursor,
+      historyDrafts,
+      inputHistoryPath: INPUT_HISTORY_PATH,
+    });
     shellDraft = "";
     input.setText("");
     setMode("normal");
@@ -1601,7 +1409,14 @@ async function submitPrompt() {
 
   if (mode === "agent_shell") {
     const command = agentShellDraft.trim();
-    await recordAndPersistHistoryEntry("agent_shell", agentShellDraft);
+    await recordAndPersistHistoryEntry({
+      currentMode: "agent_shell",
+      rawValue: agentShellDraft,
+      inputHistory,
+      historyCursor,
+      historyDrafts,
+      inputHistoryPath: INPUT_HISTORY_PATH,
+    });
     agentShellDraft = "";
     input.setText("");
     setMode("normal");
@@ -1616,7 +1431,14 @@ async function submitPrompt() {
   const content = insertDraft.trim();
   if (!content) return;
 
-  await recordAndPersistHistoryEntry("insert", insertDraft);
+  await recordAndPersistHistoryEntry({
+    currentMode: "insert",
+    rawValue: insertDraft,
+    inputHistory,
+    historyCursor,
+    historyDrafts,
+    inputHistoryPath: INPUT_HISTORY_PATH,
+  });
 
   appendEntry("user", content);
   pushConversationMessage({
@@ -1632,18 +1454,6 @@ async function submitPrompt() {
   startThinkingIndicator(`Connecting to ${currentModel}...`);
   updateSidebar(`Connecting to ${currentModel}...`);
   await runAgentLoop();
-}
-
-function isColonKey(key: KeyEvent) {
-  return key.sequence === ":" || (key.shift && key.name === ";");
-}
-
-function isShellKey(key: KeyEvent) {
-  return key.sequence === "!" || (key.shift && key.name === "1");
-}
-
-function isAgentShellKey(key: KeyEvent) {
-  return key.sequence === "@" || (key.shift && key.name === "2");
 }
 
 function handleGlobalKey(key: KeyEvent) {
@@ -1746,7 +1556,21 @@ function handleGlobalKey(key: KeyEvent) {
     const historyMode = modeToHistoryMode(mode);
 
     if (historyMode && (key.name === "up" || key.name === "down")) {
-      if (navigateHistoryInComposer(historyMode, key.name === "up" ? -1 : 1)) {
+      if (
+        navigateHistoryInComposer({
+          currentMode: historyMode,
+          delta: key.name === "up" ? -1 : 1,
+          inputHistory,
+          historyCursor,
+          historyDrafts,
+          currentDraftForMode,
+          setDraftForMode,
+          setComposerText,
+          moveComposerCursorToEnd: (value) => moveComposerCursorToEnd({ input, value }),
+          updateComposerHint,
+          requestRender: () => renderer.requestRender(),
+        })
+      ) {
         return;
       }
     }
@@ -1821,12 +1645,11 @@ function handleGlobalKey(key: KeyEvent) {
 
 renderer.keyInput.on("keypress", handleGlobalKey);
 
-function syncComposerDraft(value: string) {
-  const currentMode = isHistoryMode(mode) ? mode : "insert";
-  setDraftForMode(currentMode, value);
-  syncHistoryDraft({
-    currentMode,
+function syncComposerDraftValue(value: string) {
+  syncComposerDraft({
+    mode,
     value,
+    setDraftForMode,
     inputHistory,
     historyCursor,
     historyDrafts,
@@ -1834,7 +1657,7 @@ function syncComposerDraft(value: string) {
 }
 
 input.onContentChange = () => {
-  syncComposerDraft(input.plainText);
+  syncComposerDraftValue(input.plainText);
   updateComposerHint();
 };
 
