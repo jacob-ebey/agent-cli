@@ -1298,9 +1298,25 @@ async function runAgentsMdCommandFlow() {
   });
 }
 
-async function runPlanCommand() {
+async function runPlanCommand(argument: string) {
+  const trimmedArgument = argument.trim();
+
+  if (trimmedArgument && trimmedArgument !== "copy") {
+    commandDraft = "";
+    setMode("normal");
+    appendEntry(
+      "error",
+      ["Invalid plan arguments.", "", "Usage:", "- :plan", "- :plan copy"].join("\n")
+    );
+    updateSidebar("Invalid plan arguments.");
+    renderer.requestRender();
+    scrollToBottom(true);
+    return;
+  }
+
   await showPlanCommand({
     planPath: path.join(getActiveWorkspaceAbsolutePath(), ".agents", "PLAN.md"),
+    copyPath: trimmedArgument === "copy",
     setCommandDraft: (value) => {
       commandDraft = value;
     },
@@ -1396,7 +1412,12 @@ async function executeCommand(raw: string) {
   }
 
   if (command === "plan") {
-    await runPlanCommand();
+    await runPlanCommand("");
+    return;
+  }
+
+  if (command.startsWith("plan ")) {
+    await runPlanCommand(command.slice("plan".length));
     return;
   }
 

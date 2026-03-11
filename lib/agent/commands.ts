@@ -23,6 +23,7 @@ export function describeHelpOptions(currentModel: string) {
     ":model      open the searchable model picker",
     ":model ...  switch to a preset or explicit model id",
     ":plan       show the current .agents/PLAN.md",
+    ":plan copy  copy the current .agents/PLAN.md path",
     ":merge      merge the source branch or ref into the active worktree",
     ":merge ...  merge an explicit git ref, or remote plus branch, into the active worktree",
     ":summarize  compress the current chat history",
@@ -392,6 +393,7 @@ export async function summarizeConversationCommand(options: {
 
 export async function showPlanCommand(options: {
   planPath: string;
+  copyPath?: boolean;
   setCommandDraft: (value: string) => void;
   setModeNormal: () => void;
   appendSystemMessage: (content: string) => void;
@@ -403,6 +405,36 @@ export async function showPlanCommand(options: {
 
   const displayPath =
     path.relative(getActiveWorkspaceRoot(), options.planPath) || ".agents/PLAN.md";
+
+  if (options.copyPath) {
+    const platform = process.platform;
+
+    try {
+      if (platform === "darwin") {
+        await spawnClipboardCommand("pbcopy", [], options.planPath);
+      } else if (platform === "win32") {
+        await spawnClipboardCommand("clip", [], options.planPath);
+      } else {
+        try {
+          await spawnClipboardCommand("wl-copy", [], options.planPath);
+        } catch {
+          await spawnClipboardCommand("xclip", ["-selection", "clipboard"], options.planPath);
+        }
+      }
+
+      options.appendSystemMessage(`Copied ${displayPath} path to clipboard.\n\n\`${options.planPath}\``);
+      options.updateSidebar(`Copied ${displayPath} path to clipboard.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      options.appendEntry(
+        "error",
+        `Failed to copy the ${displayPath} path to the clipboard.\n\nPath:\n\`${options.planPath}\`\n\n${message}`
+      );
+      options.updateSidebar(`Failed to copy ${displayPath} path to clipboard.`);
+    }
+
+    return;
+  }
 
   try {
     const content = await fs.readFile(options.planPath, "utf8");

@@ -219,7 +219,7 @@ export function createComposerHintContent(state: SidebarPresentationState) {
   }
 
   if (state.mode === "command") {
-    return "Command mode. Run :help, :agents-md, :clear, :history, :index, :model, :plan, :summarize, or :quit, or press Esc to return to normal.";
+    return "Command mode. Run :help, :agents-md, :clear, :history, :index, :model, :plan, :plan copy, :summarize, or :quit, or press Esc to return to normal.";
   }
 
   if (state.mode === "shell") {
