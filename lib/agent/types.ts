@@ -157,6 +157,7 @@ export type AssistantStreamState = {
   transcriptIndex: number | null;
   sawOutput: boolean;
   sawToolActivity: boolean;
+  insertAfterEntryId: string | null;
   totalTokensUsed: number | null;
 };
 

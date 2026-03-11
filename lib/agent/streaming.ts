@@ -20,6 +20,7 @@ export function createAssistantStreamState(): AssistantStreamState {
     transcriptIndex: null,
     sawOutput: false,
     sawToolActivity: false,
+    insertAfterEntryId: null,
     totalTokensUsed: null,
   };
 }
@@ -30,7 +31,11 @@ export function ensureAssistantStreamEntry({
   transcriptHistory,
 }: {
   state: AssistantStreamState;
-  appendEntry: (role: "assistant", content: string, options: { recordInTranscript: false }) => ChatEntry;
+  appendEntry: (
+    role: "assistant",
+    content: string,
+    options: { recordInTranscript: false; insertBeforeEntryId?: string }
+  ) => ChatEntry;
   transcriptHistory: PersistedTranscriptEntry[];
 }) {
   if (state.entry) {
@@ -39,6 +44,7 @@ export function ensureAssistantStreamEntry({
 
   state.entry = appendEntry("assistant", "", {
     recordInTranscript: false,
+    insertBeforeEntryId: state.insertAfterEntryId ?? undefined,
   });
   state.transcriptIndex =
     transcriptHistory.push({
@@ -100,7 +106,7 @@ export async function handleResponseChunk({
   updateSidebar: (note: string) => void;
   sendStreamStateEvent: (event: StreamStateMachineEvent) => void;
   appendAssistantContent: (contentChunk: string) => void;
-  appendSystemMessage: (content: string) => void;
+  appendSystemMessage: (content: string) => string;
   summarizeToolResult: (toolName: string, input: unknown, output: unknown) => string | null;
   refreshUpmergeState: () => Promise<void>;
 }) {
@@ -126,18 +132,22 @@ export async function handleResponseChunk({
       stopThinkingIndicator();
       updateSidebar(`Preparing tool input: ${chunk.toolName}`);
       break;
-    case "tool-result":
+    case "tool-result": {
       state.sawToolActivity = true;
       stopThinkingIndicator();
-      appendSystemMessage(
+      const systemEntryId = appendSystemMessage(
         summarizeToolResult(chunk.toolName, chunk.input, chunk.output) ??
           [`Tool \`${chunk.toolName}\` completed.`, "", formatToolOutput(chunk.output)].join(
             "\n"
           )
       );
+      if (state.entry) {
+        state.insertAfterEntryId = systemEntryId;
+      }
       await refreshUpmergeState();
       updateSidebar(`Tool completed: ${chunk.toolName}`);
       break;
+    }
     case "finish":
       state.totalTokensUsed = chunk.totalUsage.totalTokens ?? null;
       break;

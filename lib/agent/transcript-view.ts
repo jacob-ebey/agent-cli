@@ -45,6 +45,7 @@ export function appendTranscriptEntry(options: {
   role: ChatRole;
   content: string;
   recordInTranscript?: boolean;
+  insertBeforeEntryId?: string;
   onEntryAdded?: () => void;
 }): ChatEntry {
   const theme = roleTheme(options.role);
@@ -66,7 +67,6 @@ export function appendTranscriptEntry(options: {
   });
 
   container.add(body);
-  options.transcript.add(container);
 
   const entry: ChatEntry = {
     id: container.id,
@@ -75,6 +75,25 @@ export function appendTranscriptEntry(options: {
     body,
   };
 
+  if (options.insertBeforeEntryId) {
+    const targetIndex = options.entries.findIndex(
+      (existingEntry) => existingEntry.id === options.insertBeforeEntryId
+    );
+    if (targetIndex >= 0) {
+      options.transcript.add(container, targetIndex);
+      options.entries.splice(targetIndex, 0, entry);
+      if (options.recordInTranscript !== false) {
+        options.transcriptHistory.splice(targetIndex, 0, {
+          role: options.role,
+          content: options.content,
+        });
+      }
+      options.onEntryAdded?.();
+      return entry;
+    }
+  }
+
+  options.transcript.add(container);
   options.entries.push(entry);
   if (options.recordInTranscript !== false) {
     options.transcriptHistory.push({ role: options.role, content: options.content });

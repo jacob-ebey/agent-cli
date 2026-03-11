@@ -1067,6 +1067,7 @@ function appendEntry(
   content: string,
   options: {
     recordInTranscript?: boolean;
+    insertBeforeEntryId?: string;
   } = {}
 ) {
   return appendTranscriptEntry({
@@ -1078,6 +1079,7 @@ function appendEntry(
     role,
     content,
     recordInTranscript: options.recordInTranscript,
+    insertBeforeEntryId: options.insertBeforeEntryId,
     onEntryAdded: () => {
       updateSidebar();
       scrollToBottom();
@@ -1103,7 +1105,7 @@ function appendSystemMessage(
     recordInConversation?: boolean;
   } = {}
 ) {
-  appendEntry("system", content);
+  const entry = appendEntry("system", content);
   if (options.recordInConversation !== false) {
     pushConversationMessage(
       {
@@ -1114,6 +1116,7 @@ function appendSystemMessage(
     );
   }
   void persistActiveConversation();
+  return entry.id;
 }
 
 function clearEntries() {
@@ -1517,7 +1520,10 @@ async function runAgentLoop() {
           applyFinalAssistantTextIfNeeded({
             state,
             responseMessages,
-            appendEntry: (role, content) => appendEntry(role, content),
+            appendEntry: (role, content) =>
+              appendEntry(role, content, {
+                insertBeforeEntryId: state.insertAfterEntryId ?? undefined,
+              }),
           });
           updateSidebar();
           await persistActiveConversation();
