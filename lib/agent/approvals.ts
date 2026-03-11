@@ -101,3 +101,62 @@ export async function ensureToolApproval(
     );
   }
 }
+
+export function currentApprovalPrompt(request: PendingApproval) {
+  return request.approvalPersistence === "persisted"
+    ? "Press `y` to approve this command once, `a` to always approve this exact command, or `n` to deny."
+    : "Press `y` to approve edits to this file for the rest of the session, or `n` to deny.";
+}
+
+export function isApprovalAlreadyGranted(
+  request: PendingApproval,
+  approvals: {
+    approvedEditTargets: Set<string>;
+    approvedShellCommands: Set<string>;
+  }
+) {
+  return request.approvalPersistence === "persisted"
+    ? approvals.approvedShellCommands.has(request.approvalKey)
+    : approvals.approvedEditTargets.has(request.approvalKey);
+}
+
+export function shiftNextPendingApproval(options: {
+  activeApproval: PendingApproval | null;
+  queuedApprovals: PendingApproval[];
+  approvedEditTargets: Set<string>;
+  approvedShellCommands: Set<string>;
+}): PendingApproval | null {
+  if (options.activeApproval) {
+    return options.activeApproval;
+  }
+
+  while (options.queuedApprovals.length) {
+    const next = options.queuedApprovals.shift()!;
+    if (
+      isApprovalAlreadyGranted(next, {
+        approvedEditTargets: options.approvedEditTargets,
+        approvedShellCommands: options.approvedShellCommands,
+      })
+    ) {
+      next.resolve(next.approvalPersistence === "persisted" ? "always" : "session");
+      continue;
+    }
+
+    return next;
+  }
+
+  return null;
+}
+
+export function clearApprovalQueueState(options: {
+  activeApproval: PendingApproval | null;
+  queuedApprovals: PendingApproval[];
+}) {
+  if (options.activeApproval) {
+    options.activeApproval.resolve("deny");
+  }
+
+  while (options.queuedApprovals.length) {
+    options.queuedApprovals.shift()?.resolve("deny");
+  }
+}

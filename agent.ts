@@ -85,7 +85,10 @@ import {
 } from "./lib/agent/conversation-store.ts";
 import { loadInputHistory, saveInputHistory } from "./lib/agent/input-history.ts";
 import {
+  clearApprovalQueueState,
+  currentApprovalPrompt,
   ensureToolApproval,
+  shiftNextPendingApproval,
 } from "./lib/agent/approvals.ts";
 import { runShellCommandSession } from "./lib/agent/shell-runner.ts";
 import {
@@ -232,18 +235,6 @@ let autoScrollState: AutoScrollState = "follow";
 let currentModel: string =
   persistedConfig.currentModel ?? MODEL_PRESETS.anthropic;
 
-function currentApprovalPrompt(request: PendingApproval) {
-  return request.approvalPersistence === "persisted"
-    ? "Press `y` to approve this command once, `a` to always approve this exact command, or `n` to deny."
-    : "Press `y` to approve edits to this file for the rest of the session, or `n` to deny.";
-}
-
-function isApprovalAlreadyGranted(request: PendingApproval) {
-  return request.approvalPersistence === "persisted"
-    ? approvedShellCommands.has(request.approvalKey)
-    : approvedEditTargets.has(request.approvalKey);
-}
-
 function announceActiveApproval() {
   if (!activeApproval) {
     return;
@@ -269,18 +260,14 @@ function announceActiveApproval() {
 }
 
 function activateNextApproval() {
+  activeApproval = shiftNextPendingApproval({
+    activeApproval,
+    queuedApprovals,
+    approvedEditTargets,
+    approvedShellCommands,
+  });
+
   if (activeApproval) {
-    return;
-  }
-
-  while (queuedApprovals.length) {
-    const next = queuedApprovals.shift()!;
-    if (isApprovalAlreadyGranted(next)) {
-      next.resolve(next.approvalPersistence === "persisted" ? "always" : "session");
-      continue;
-    }
-
-    activeApproval = next;
     announceActiveApproval();
     return;
   }
@@ -306,14 +293,11 @@ function enqueueApproval(request: PendingApproval) {
 }
 
 function clearApprovalQueue() {
-  if (activeApproval) {
-    activeApproval.resolve("deny");
-    activeApproval = null;
-  }
-
-  while (queuedApprovals.length) {
-    queuedApprovals.shift()?.resolve("deny");
-  }
+  clearApprovalQueueState({
+    activeApproval,
+    queuedApprovals,
+  });
+  activeApproval = null;
 }
 
 function updateTranscriptTitle() {
