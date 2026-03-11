@@ -1,5 +1,11 @@
 {
   "version": 1,
-  "approvedCommands": ["bun typecheck", "bun test"],
-  "startupCommands": ["bun i"]
+  "approvedCommands": [
+    "bun test",
+    "bun test test/agent-cli.integration.test.ts",
+    "bun typecheck"
+  ],
+  "startupCommands": [
+    "bun i"
+  ]
 }

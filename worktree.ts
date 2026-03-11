@@ -3,9 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-const ORIGINAL_WORKSPACE_ROOT = process.cwd();
 const DEV_NULL_PATH = "/dev/null";
-const SHELL_CONFIG_PATH = path.join(ORIGINAL_WORKSPACE_ROOT, ".agents", "shell.json");
 
 type BaselineRecord = {
   baselinePath: string | null;
@@ -20,7 +18,7 @@ type UpmergeConflictRecord = {
 const UPMERGE_IGNORED_PATHS = new Set([".agents/PLAN.md"]);
 
 function shouldIgnoreUpmergePath(relativePath: string) {
-  return UPMERGE_IGNORED_PATHS.has(toPortablePath(relativePath));
+  return UPMERGE_IGNORED_PATHS.has(relativePath.split(path.sep).join("/"));
 }
 
 type SessionState =
@@ -87,23 +85,53 @@ export type UpmergeStatus = {
 
 export type UpmergeResolutionStrategy = "accept-main" | "accept-worktree" | "mark-resolved";
 
-let sessionState: SessionState = {
-  initialized: false,
-  mode: "direct",
-  note: "A git worktree will be created on the first edit when available.",
-  trackedFiles: new Map(),
-  conflicts: new Map(),
-};
-
-let detectedGitRoot: string | null | undefined;
-let ensureSessionPromise: Promise<SessionState> | null = null;
-let sessionStorageRoot: string | null = null;
-
-function toPortablePath(relativePath: string) {
-  return relativePath.split(path.sep).join("/");
+function createInitialSessionState(): SessionState {
+  return {
+    initialized: false,
+    mode: "direct",
+    note: "A git worktree will be created on the first edit when available.",
+    trackedFiles: new Map(),
+    conflicts: new Map(),
+  };
 }
 
-function isInsideRoot(root: string, targetPath: string) {
+export type WorkspaceSessionManager = {
+  getOriginalWorkspaceRoot: () => string;
+  setWorkspaceSessionStorageRoot: (storageRoot: string | null) => void;
+  captureWorkspaceSession: () => PersistedWorkspaceSession | null;
+  restoreWorkspaceSession: (session: PersistedWorkspaceSession | null) => void;
+  getActiveWorkspaceRoot: () => string;
+  getActiveWorkspaceAbsolutePath: () => string;
+  resolveOriginalWorkspacePath: (targetPath: string) => string;
+  relativeOriginalWorkspacePath: (targetPath: string) => string;
+  prepareWorkspaceForEdit: () => Promise<SessionState>;
+  trackEditTarget: (targetPath: string) => Promise<{ mode: "direct" | "worktree"; relativePath: string }>;
+  getUpmergeStatus: () => Promise<UpmergeStatus>;
+  getUpmergePreview: (relativePath?: string) => Promise<string>;
+  upmergeRelativePath: (relativePath: string) => Promise<string>;
+  revertRelativePath: (relativePath: string) => Promise<string>;
+  upmergeAll: () => Promise<string>;
+  resolveUpmergeConflict: (
+    relativePath: string,
+    strategy: UpmergeResolutionStrategy
+  ) => Promise<string>;
+  cleanupWorkspaceSession: (targetSession?: PersistedWorkspaceSession | null) => Promise<void>;
+};
+
+export function createWorkspaceSessionManager(workspaceRoot = process.cwd()): WorkspaceSessionManager {
+  const ORIGINAL_WORKSPACE_ROOT = workspaceRoot;
+  const SHELL_CONFIG_PATH = path.join(ORIGINAL_WORKSPACE_ROOT, ".agents", "shell.json");
+
+  let sessionState: SessionState = createInitialSessionState();
+  let detectedGitRoot: string | null | undefined;
+  let ensureSessionPromise: Promise<SessionState> | null = null;
+  let sessionStorageRoot: string | null = null;
+
+  function toPortablePath(relativePath: string) {
+    return relativePath.split(path.sep).join("/");
+  }
+
+  function isInsideRoot(root: string, targetPath: string) {
   const relative = path.relative(root, targetPath);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
@@ -613,15 +641,15 @@ async function advanceBaseline(relativePath: string) {
   await writeBaseline(relativePath, stat?.isFile() ? worktreePath : null);
 }
 
-export function getOriginalWorkspaceRoot() {
+function getOriginalWorkspaceRoot() {
   return ORIGINAL_WORKSPACE_ROOT;
 }
 
-export function setWorkspaceSessionStorageRoot(storageRoot: string | null) {
+function setWorkspaceSessionStorageRoot(storageRoot: string | null) {
   sessionStorageRoot = storageRoot;
 }
 
-export function captureWorkspaceSession(): PersistedWorkspaceSession | null {
+function captureWorkspaceSession(): PersistedWorkspaceSession | null {
   if (sessionState.mode !== "worktree") {
     return null;
   }
@@ -650,7 +678,7 @@ export function captureWorkspaceSession(): PersistedWorkspaceSession | null {
   };
 }
 
-export function restoreWorkspaceSession(session: PersistedWorkspaceSession | null) {
+function restoreWorkspaceSession(session: PersistedWorkspaceSession | null) {
   ensureSessionPromise = null;
 
   if (!session) {
@@ -694,30 +722,30 @@ export function restoreWorkspaceSession(session: PersistedWorkspaceSession | nul
   };
 }
 
-export function getActiveWorkspaceRoot() {
+function getActiveWorkspaceRoot() {
   return sessionState.mode === "worktree"
     ? sessionState.worktreeWorkspaceRoot
     : ORIGINAL_WORKSPACE_ROOT;
 }
 
-export function getActiveWorkspaceAbsolutePath() {
+function getActiveWorkspaceAbsolutePath() {
   return getActiveWorkspaceRoot();
 }
 
-export function resolveOriginalWorkspacePath(targetPath: string) {
+function resolveOriginalWorkspacePath(targetPath: string) {
   return resolvePathWithinRoot(ORIGINAL_WORKSPACE_ROOT, targetPath);
 }
 
-export function relativeOriginalWorkspacePath(targetPath: string) {
+function relativeOriginalWorkspacePath(targetPath: string) {
   const relative = path.relative(ORIGINAL_WORKSPACE_ROOT, targetPath);
   return relative || ".";
 }
 
-export async function prepareWorkspaceForEdit() {
+async function prepareWorkspaceForEdit() {
   return await ensureSession();
 }
 
-export async function trackEditTarget(targetPath: string) {
+async function trackEditTarget(targetPath: string) {
   const session = await ensureSession();
   if (session.mode !== "worktree") {
     return {
@@ -743,7 +771,7 @@ export async function trackEditTarget(targetPath: string) {
   };
 }
 
-export async function getUpmergeStatus(): Promise<UpmergeStatus> {
+async function getUpmergeStatus(): Promise<UpmergeStatus> {
   if (sessionState.mode === "worktree") {
     const pendingFiles: string[] = [];
     const conflictedFiles: UpmergeConflictStatus[] = [];
@@ -797,7 +825,7 @@ export async function getUpmergeStatus(): Promise<UpmergeStatus> {
   };
 }
 
-export async function getUpmergePreview(relativePath?: string): Promise<string> {
+async function getUpmergePreview(relativePath?: string): Promise<string> {
   const status = await getUpmergeStatus();
   if (status.mode !== "worktree") {
     return `${status.note}\n\nThere are no pending upmerges.`;
@@ -854,7 +882,7 @@ export async function getUpmergePreview(relativePath?: string): Promise<string> 
   return combined || "No pending upmerges.";
 }
 
-export async function upmergeRelativePath(relativePath: string) {
+async function upmergeRelativePath(relativePath: string) {
   const status = await getUpmergeStatus();
   if (status.mode !== "worktree") {
     return status.note;
@@ -943,7 +971,7 @@ export async function upmergeRelativePath(relativePath: string) {
   return `Upmerged ${relativePath} into the main workspace.`;
 }
 
-export async function revertRelativePath(relativePath: string) {
+async function revertRelativePath(relativePath: string) {
   const status = await getUpmergeStatus();
   if (status.mode !== "worktree") {
     return status.note;
@@ -972,7 +1000,7 @@ export async function revertRelativePath(relativePath: string) {
   return `Reverted pending changes for ${relativePath}.`;
 }
 
-export async function upmergeAll() {
+async function upmergeAll() {
   const status = await getUpmergeStatus();
   if (status.mode !== "worktree") {
     return status.note;
@@ -1001,7 +1029,7 @@ export async function upmergeAll() {
   return results.join("\n");
 }
 
-export async function resolveUpmergeConflict(
+async function resolveUpmergeConflict(
   relativePath: string,
   strategy: UpmergeResolutionStrategy
 ) {
@@ -1050,7 +1078,7 @@ export async function resolveUpmergeConflict(
   return `Marked upmerge conflict for ${relativePath} as resolved.`;
 }
 
-export async function cleanupWorkspaceSession(
+async function cleanupWorkspaceSession(
   targetSession: PersistedWorkspaceSession | null = captureWorkspaceSession()
 ) {
   if (!targetSession) {
@@ -1062,13 +1090,50 @@ export async function cleanupWorkspaceSession(
   await fs.rm(sessionRoot, { recursive: true, force: true });
 
   if (sessionState.mode === "worktree" && sessionState.sessionRoot === sessionRoot) {
-    sessionState = {
-      initialized: false,
-      mode: "direct",
-      note: "A git worktree will be created on the first edit when available.",
-      trackedFiles: new Map(),
-      conflicts: new Map(),
-    };
+    sessionState = createInitialSessionState();
     ensureSessionPromise = null;
   }
 }
+
+  return {
+    getOriginalWorkspaceRoot,
+    setWorkspaceSessionStorageRoot,
+    captureWorkspaceSession,
+    restoreWorkspaceSession,
+    getActiveWorkspaceRoot,
+    getActiveWorkspaceAbsolutePath,
+    resolveOriginalWorkspacePath,
+    relativeOriginalWorkspacePath,
+    prepareWorkspaceForEdit,
+    trackEditTarget,
+    getUpmergeStatus,
+    getUpmergePreview,
+    upmergeRelativePath,
+    revertRelativePath,
+    upmergeAll,
+    resolveUpmergeConflict,
+    cleanupWorkspaceSession,
+  };
+}
+
+const defaultWorkspaceSessionManager = createWorkspaceSessionManager();
+
+export const {
+  getOriginalWorkspaceRoot,
+  setWorkspaceSessionStorageRoot,
+  captureWorkspaceSession,
+  restoreWorkspaceSession,
+  getActiveWorkspaceRoot,
+  getActiveWorkspaceAbsolutePath,
+  resolveOriginalWorkspacePath,
+  relativeOriginalWorkspacePath,
+  prepareWorkspaceForEdit,
+  trackEditTarget,
+  getUpmergeStatus,
+  getUpmergePreview,
+  upmergeRelativePath,
+  revertRelativePath,
+  upmergeAll,
+  resolveUpmergeConflict,
+  cleanupWorkspaceSession,
+} = defaultWorkspaceSessionManager;
