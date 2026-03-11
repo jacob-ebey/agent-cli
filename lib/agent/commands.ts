@@ -1,3 +1,5 @@
+import * as fs from "node:fs/promises";
+
 import { generateTextResponse } from "../llm.ts";
 import { indexSkills } from "../skills-index.ts";
 import { MODEL_PRESETS, WORKSPACE_ROOT } from "./constants.ts";
@@ -110,6 +112,31 @@ export async function summarizeConversationCommand(options: {
     options.updateComposerHint();
     options.requestRender();
     options.scrollToBottom(true);
+  }
+}
+
+export async function showPlanCommand(options: {
+  planPath: string;
+  setCommandDraft: (value: string) => void;
+  setModeNormal: () => void;
+  appendSystemMessage: (content: string) => void;
+  appendEntry: (role: "error", content: string) => void;
+  updateSidebar: (note: string) => void;
+}) {
+  options.setCommandDraft("");
+  options.setModeNormal();
+
+  try {
+    const content = await fs.readFile(options.planPath, "utf8");
+    const trimmed = content.trim();
+    options.appendSystemMessage(
+      trimmed ? `Current PLAN.md\n\n${trimmed}` : "Current PLAN.md is empty."
+    );
+    options.updateSidebar("Displayed current PLAN.md.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    options.appendEntry("error", `Failed to read PLAN.md.\n\n${message}`);
+    options.updateSidebar("Failed to read PLAN.md.");
   }
 }
 

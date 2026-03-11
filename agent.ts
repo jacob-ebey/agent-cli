@@ -143,6 +143,7 @@ import {
   describeModelOptions,
   resolveRequestedModel,
   runIndexCommand as runIndexCommandFlow,
+  showPlanCommand,
   summarizeConversationCommand,
 } from "./lib/agent/commands.ts";
 import {
@@ -347,7 +348,10 @@ function clearApprovalQueue() {
 }
 
 function updateTranscriptTitle() {
-  transcriptPanel.title = busy ? "Conversation [...]" : "Conversation";
+  const spinner = busy
+    ? ` ${THINKING_FRAMES[thinkingFrameIndex] ?? THINKING_FRAMES[0]}`
+    : "";
+  transcriptPanel.title = `Conversation${spinner}`;
 }
 
 function stopThinkingIndicator() {
@@ -356,6 +360,7 @@ function stopThinkingIndicator() {
     activeThinkingIndicator = null;
   }
   thinkingFrameIndex = 0;
+  updateTranscriptTitle();
 }
 
 function startThinkingIndicator(baseNote = latestSidebarNote) {
@@ -365,11 +370,13 @@ function startThinkingIndicator(baseNote = latestSidebarNote) {
   }
 
   thinkingFrameIndex = 0;
+  updateTranscriptTitle();
   updateSidebar(baseNote);
   renderer.requestRender();
 
   activeThinkingIndicator = setInterval(() => {
     thinkingFrameIndex = (thinkingFrameIndex + 1) % THINKING_FRAMES.length;
+    updateTranscriptTitle();
     updateSidebar(baseNote);
     renderer.requestRender();
   }, 80);
@@ -1171,6 +1178,21 @@ async function runIndexCommand() {
   });
 }
 
+async function runPlanCommand() {
+  await showPlanCommand({
+    planPath: path.join(WORKSPACE_ROOT, ".agents", "PLAN.md"),
+    setCommandDraft: (value) => {
+      commandDraft = value;
+    },
+    setModeNormal: () => setMode("normal"),
+    appendSystemMessage,
+    appendEntry: (role, content) => appendEntry(role, content),
+    updateSidebar,
+  });
+  renderer.requestRender();
+  scrollToBottom(true);
+}
+
 async function executeCommand(raw: string) {
   const command = raw.trim();
 
@@ -1201,6 +1223,11 @@ async function executeCommand(raw: string) {
 
   if (command === "index") {
     await runIndexCommand();
+    return;
+  }
+
+  if (command === "plan") {
+    await runPlanCommand();
     return;
   }
 

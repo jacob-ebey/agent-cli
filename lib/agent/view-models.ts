@@ -1,4 +1,3 @@
-import { THINKING_FRAMES } from "./constants.ts";
 import type {
   SidebarPresentationState,
   SidebarViewModel,
@@ -105,16 +104,11 @@ function createSessionSidebarViewModel(
   state: SidebarPresentationState,
   note: string
 ): SidebarViewModel {
-  const thinkingBadge =
-    state.busy && state.activeThinking
-      ? ` ${state.thinkingFrame || THINKING_FRAMES[0]} thinking`
-      : "";
-
   return {
     title: "Session",
     borderColor: "#334155",
     content: [
-      `Status: ${state.busy ? "streaming" : "idle"}${thinkingBadge}`,
+      `Status: ${state.busy ? "streaming" : "idle"}`,
       `Mode: ${state.mode}`,
       `Model: ${state.currentModel}`,
       `Messages: ${state.entriesCount}`,
@@ -136,6 +130,7 @@ function createSessionSidebarViewModel(
       ":history browse saved chats",
       ":index embed skill chunks",
       ":model open searchable model picker",
+      ":plan show current PLAN.md",
       ":summarize compress chat history",
       ":quit  exit UI",
       "",
@@ -207,7 +202,7 @@ export function createComposerHintContent(state: SidebarPresentationState) {
   }
 
   if (state.mode === "command") {
-    return "Command mode. Run :clear, :history, :index, :model, :summarize, or :quit, or press Esc to return to normal.";
+    return "Command mode. Run :clear, :history, :index, :model, :plan, :summarize, or :quit, or press Esc to return to normal.";
   }
 
   if (state.mode === "shell") {
