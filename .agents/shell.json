@@ -1,5 +1,5 @@
 {
   "version": 1,
   "startupCommands": ["pnpm i"],
-  "approvedCommands": ["pnpm exec tsc --noEmit"]
+  "approvedCommands": ["pnpm typecheck"]
 }

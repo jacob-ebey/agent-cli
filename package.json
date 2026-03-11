@@ -2,7 +2,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node --experimental-strip-types agent.ts",
+    "start": "node agent.ts",
     "typecheck": "pnpm exec tsc --noEmit"
   },
   "packageManager": "pnpm@10.12.1",

@@ -182,13 +182,39 @@ export async function loadRootAgentsGuidance() {
   }
 }
 
-export async function loadInitialSystemMessage() {
-  const [baseSystemPrompt, rootAgentsGuidance] = await Promise.all([
-    fs.readFile(SYSTEM_PROMPT_PATH, "utf-8"),
-    loadRootAgentsGuidance(),
-  ]);
+async function loadShellApprovalGuidance() {
+  const config = await loadPersistedShellConfig();
+  const approvedCommands = [...config.approvedCommands].sort((left, right) =>
+    left.localeCompare(right)
+  );
 
-  return [baseSystemPrompt, rootAgentsGuidance]
+  if (approvedCommands.length === 0) {
+    return [
+      "Additional shell approval guidance:",
+      "",
+      "- If workspace `.agents/shell.json` defines any approved shell commands, they are included in this prompt and may be used without asking again.",
+      "- Any additional shell commands may still require user approval, so use them sparingly and only when necessary.",
+    ].join("\n");
+  }
+
+  return [
+    "Additional shell approval guidance from workspace `.agents/shell.json`:",
+    "",
+    "- The following shell commands are already approved and may be used without asking again:",
+    ...approvedCommands.map((command) => `  - \`${command}\``),
+    "- Any additional shell commands may still require user approval, so use them sparingly and only when necessary.",
+  ].join("\n");
+}
+
+export async function loadInitialSystemMessage() {
+  const [baseSystemPrompt, rootAgentsGuidance, shellApprovalGuidance] =
+    await Promise.all([
+      fs.readFile(SYSTEM_PROMPT_PATH, "utf-8"),
+      loadRootAgentsGuidance(),
+      loadShellApprovalGuidance(),
+    ]);
+
+  return [baseSystemPrompt, rootAgentsGuidance, shellApprovalGuidance]
     .filter((part) => part && part.trim())
     .join("\n\n");
 }
