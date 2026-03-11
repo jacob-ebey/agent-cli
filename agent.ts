@@ -54,6 +54,14 @@ import {
   readStringArgument,
 } from "./lib/agent/utils.ts";
 import {
+  checkManualShellConstraints,
+  checkToolConstraints,
+  createSessionConstraintState,
+  formatConstraintsSidebarSummary,
+  recordSuccessfulEdit,
+  recordSuccessfulShellCommand,
+} from "./lib/agent/constraints.ts";
+import {
   loadInitialSystemMessage,
   loadPersistedConfig,
   loadPersistedShellApprovals,
@@ -74,6 +82,7 @@ import {
   clearApprovalQueueState,
   currentApprovalPrompt,
   ensureToolApproval,
+  getApprovalTarget,
   settleApprovalDecision,
   shiftNextPendingApproval,
 } from "./lib/agent/approvals.ts";
@@ -145,11 +154,14 @@ import {
   syncComposerDraft,
 } from "./lib/agent/input-controller.ts";
 import {
+  buildCritiquePrompt,
+  buildReviewPrompt,
   copyWorktreePathCommand,
   describeHelpOptions,
   describeModelOptions,
   resolveRequestedModel,
   runAgentsMdCommand,
+  runConstraintsCommand,
   runIndexCommand as runIndexCommandFlow,
   runMergeWorktreeCommand,
   showPlanCommand,
@@ -198,6 +210,7 @@ const [persistedConfig, approvedShellCommands, persistedInputHistory] =
     loadPersistedShellApprovals(),
     loadInputHistory(),
   ]);
+const sessionConstraintState = createSessionConstraintState();
 const initialConversationState = await resolveInitialConversationState(
   createInitialConversationMessages()
 );
@@ -209,12 +222,36 @@ const tools = Array.from(loadedTools.values(), (tool) => ({
     const parsedArguments = isRecord(input) ? input : {};
 
     try {
+      const approvalTarget = await getApprovalTarget(
+        tool.definition.name,
+        tool,
+        parsedArguments
+      );
+      const constraintViolation = checkToolConstraints({
+        toolName: tool.definition.name,
+        targetPath: approvalTarget?.approvalPersistence === "session" ? approvalTarget.approvalKey : null,
+        state: sessionConstraintState,
+      });
+      if (constraintViolation) {
+        throw new Error(constraintViolation);
+      }
+
       await ensureToolApproval(tool.definition.name, tool, parsedArguments, {
         approvedEditTargets,
         approvedShellCommands,
         enqueueApproval,
       });
-      return await tool.execute(parsedArguments);
+      const output = await tool.execute(parsedArguments);
+      if (tool.definition.name === "apply-patch" && approvalTarget?.approvalPersistence === "session") {
+        recordSuccessfulEdit(approvalTarget.approvalKey, sessionConstraintState);
+      }
+      if (tool.definition.name === "run_shell_command") {
+        const command = readStringArgument(parsedArguments, "command");
+        if (command) {
+          recordSuccessfulShellCommand(command, sessionConstraintState);
+        }
+      }
+      return output;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return `Tool execution failed: ${message}`;
@@ -1058,6 +1095,7 @@ function buildSidebarPresentationState(): SidebarPresentationState {
     autoScrollState,
     activeShellSession: activeShellSession !== null,
     insertDraft,
+    constraintsSummary: formatConstraintsSidebarSummary(sessionConstraintState.constraints),
   };
 }
 
@@ -1329,6 +1367,90 @@ async function runPlanCommand(argument: string) {
   scrollToBottom(true);
 }
 
+async function submitSyntheticPrompt(content: string, sidebarNote: string) {
+  if (busy) {
+    updateSidebar("Wait for the current stream or shell command to finish first.");
+    renderer.requestRender();
+    return;
+  }
+
+  appendEntry("user", content);
+  pushConversationMessage({
+    role: "user",
+    content,
+  });
+  await persistActiveConversation();
+
+  setBusy(true);
+  sendStreamStateEvent("start-connection");
+  insertDraft = "";
+  input.setText("");
+  setMode("normal");
+  startThinkingIndicator(`Connecting to ${currentModel}...`);
+  updateSidebar(sidebarNote);
+  await runAgentLoop();
+}
+
+async function runCritiqueCommand(argument: string) {
+  const trimmed = argument.trim();
+  if (!trimmed) {
+    commandDraft = "";
+    setMode("normal");
+    appendEntry(
+      "error",
+      ["Missing critique target.", "", "Usage:", "- :critique <design, plan, or request>"].join("\n")
+    );
+    updateSidebar("Missing critique target.");
+    renderer.requestRender();
+    scrollToBottom(true);
+    return;
+  }
+
+  commandDraft = "";
+  await submitSyntheticPrompt(buildCritiquePrompt(trimmed), "Running critique...");
+}
+
+async function runReviewCommand() {
+  commandDraft = "";
+  const pendingPaths = upmergeItems
+    .filter((item) => item.path && item.kind !== "action")
+    .map((item) => item.path as string);
+  await submitSyntheticPrompt(
+    buildReviewPrompt({
+      constraints: sessionConstraintState.constraints,
+      validationFresh: sessionConstraintState.validationFresh,
+      editedFiles: [...sessionConstraintState.editedFiles].map((filePath) =>
+        relativeOriginalWorkspacePath(filePath)
+      ),
+      upmergeMode,
+      upmergeNote,
+      pendingPaths,
+    }),
+    sessionConstraintState.constraints.requireValidation && !sessionConstraintState.validationFresh
+      ? "Reviewing session state. Validation is currently stale."
+      : "Reviewing session state..."
+  );
+}
+
+async function runConstraintsCommandFlow(argument: string) {
+  await runConstraintsCommand({
+    argument,
+    currentConstraints: sessionConstraintState.constraints,
+    setConstraints: (next) => {
+      sessionConstraintState.constraints = next;
+    },
+    setCommandDraft: (value) => {
+      commandDraft = value;
+    },
+    setModeNormal: () => setMode("normal"),
+    appendSystemMessage,
+    appendEntry: (role, content) => appendEntry(role, content),
+    updateSidebar,
+  });
+  renderer.requestRender();
+  scrollToBottom(true);
+}
+
 async function runMergeCommand(argument: string) {
   await runMergeWorktreeCommand({
     argument,
@@ -1421,6 +1543,26 @@ async function executeCommand(raw: string) {
     return;
   }
 
+  if (command === "review") {
+    await runReviewCommand();
+    return;
+  }
+
+  if (command === "constraints") {
+    await runConstraintsCommandFlow("");
+    return;
+  }
+
+  if (command.startsWith("constraints ")) {
+    await runConstraintsCommandFlow(command.slice("constraints".length));
+    return;
+  }
+
+  if (command.startsWith("critique ")) {
+    await runCritiqueCommand(command.slice("critique".length));
+    return;
+  }
+
   if (command === "merge") {
     await runMergeCommand("");
     return;
@@ -1454,6 +1596,15 @@ async function executeShellInput(raw: string, visibility: ShellVisibility) {
   const command = raw.trim();
 
   if (!command) {
+    return;
+  }
+
+  const shellConstraintViolation = checkManualShellConstraints(sessionConstraintState);
+  if (shellConstraintViolation) {
+    appendEntry("error", shellConstraintViolation);
+    updateSidebar("Shell command blocked by session constraints.");
+    renderer.requestRender();
+    scrollToBottom(true);
     return;
   }
 
@@ -1496,6 +1647,7 @@ async function executeShellInput(raw: string, visibility: ShellVisibility) {
         content: shellEntry.snapshot(false),
       });
     }
+    recordSuccessfulShellCommand(command, sessionConstraintState);
     await persistActiveConversation();
   } finally {
     activeShellSession = null;

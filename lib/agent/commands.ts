@@ -5,11 +5,23 @@ import * as path from "node:path";
 import { generateTextResponse, streamResponse, type Message, type Tool } from "../llm.ts";
 import { indexSkills } from "../skills-index.ts";
 import { MODEL_PRESETS, ROOT_AGENTS_PATH, WORKSPACE_ROOT } from "./constants.ts";
+import {
+  DEFAULT_SESSION_CONSTRAINTS,
+  applyConstraintUpdates,
+  formatConstraintsSummary,
+  parseConstraintsCommand,
+} from "./constraints.ts";
 import { getActiveWorkspaceRoot, mergeSourceIntoWorktree } from "../../worktree.ts";
 import { buildConversationSummaryPrompt, createSummarizedConversationState, hasMeaningfulTranscript } from "./summarize.ts";
 import { resolveModelCommand } from "./model-menu.ts";
 import { appendChunkWithLimit, extractAssistantText } from "./utils.ts";
-import type { AgentsContextResult, ConversationMessage, LoadedTool, PersistedTranscriptEntry } from "./types.ts";
+import type {
+  AgentsContextResult,
+  ConversationMessage,
+  LoadedTool,
+  PersistedTranscriptEntry,
+  SessionConstraints,
+} from "./types.ts";
 
 export function describeHelpOptions(currentModel: string) {
   return [
@@ -24,6 +36,9 @@ export function describeHelpOptions(currentModel: string) {
     ":model ...  switch to a preset or explicit model id",
     ":plan       show the current .agents/PLAN.md",
     ":plan copy  copy the current .agents/PLAN.md path",
+    ":critique   critique a design, plan, or change request",
+    ":review     review the current session state and pending changes",
+    ":constraints show or update session safety constraints",
     ":merge      merge the source branch or ref into the active worktree",
     ":merge ...  merge an explicit git ref, or remote plus branch, into the active worktree",
     ":summarize  compress the current chat history",
@@ -562,6 +577,114 @@ export async function runMergeWorktreeCommand(options: {
     const message = error instanceof Error ? error.message : String(error);
     options.appendEntry("error", `Worktree merge failed.\n\n${message}`);
     options.updateSidebar("Worktree merge failed.");
+  }
+}
+
+export function buildCritiquePrompt(argument: string) {
+  const trimmed = argument.trim();
+  return [
+    "Critique the following design, plan, or request as a careful technical reviewer.",
+    "",
+    "Required output sections:",
+    "- Strongest objections",
+    "- Hidden assumptions",
+    "- Simpler alternatives",
+    "- Maintenance and UX risks",
+    "- Unresolved questions",
+    "- Recommendation",
+    "",
+    "Do not start implementing. Focus on critique, tradeoffs, and gaps.",
+    "",
+    trimmed,
+  ].join("\n");
+}
+
+export function buildReviewPrompt(options: {
+  constraints: SessionConstraints;
+  validationFresh: boolean;
+  editedFiles: string[];
+  upmergeMode: "direct" | "worktree";
+  upmergeNote: string;
+  pendingPaths: string[];
+}) {
+  return [
+    "Review the current agent session state as a careful code reviewer.",
+    "",
+    "Ground the review in the available evidence only. If something is unknown, say so.",
+    "",
+    "Session signals:",
+    `- Constraints: ${formatConstraintsSummary(options.constraints)}`,
+    `- Validation fresh after edits: ${options.validationFresh}`,
+    `- Edited files this session: ${options.editedFiles.length ? options.editedFiles.join(", ") : "none recorded"}`,
+    `- Upmerge mode: ${options.upmergeMode}`,
+    `- Upmerge note: ${options.upmergeNote}`,
+    `- Pending changed paths: ${options.pendingPaths.length ? options.pendingPaths.join(", ") : "none visible"}`,
+    "",
+    "Required output sections:",
+    "- What appears to be happening",
+    "- Risk areas",
+    "- Missing validation or evidence",
+    "- Questions to resolve",
+    "- Recommended next steps",
+  ].join("\n");
+}
+
+export async function runConstraintsCommand(options: {
+  argument: string;
+  currentConstraints: SessionConstraints;
+  setConstraints: (next: SessionConstraints) => void;
+  setCommandDraft: (value: string) => void;
+  setModeNormal: () => void;
+  appendSystemMessage: (content: string) => void;
+  appendEntry: (role: "error", content: string) => void;
+  updateSidebar: (note: string) => void;
+}) {
+  options.setCommandDraft("");
+  options.setModeNormal();
+
+  try {
+    const parsed = parseConstraintsCommand(options.argument);
+    if (parsed.kind === "show") {
+      options.appendSystemMessage(
+        `Current session constraints\n\n${formatConstraintsSummary(options.currentConstraints)}`
+      );
+      options.updateSidebar("Displayed current session constraints.");
+      return;
+    }
+
+    if (parsed.kind === "reset") {
+      options.setConstraints({ ...DEFAULT_SESSION_CONSTRAINTS });
+      options.appendSystemMessage(
+        `Reset session constraints\n\n${formatConstraintsSummary(DEFAULT_SESSION_CONSTRAINTS)}`
+      );
+      options.updateSidebar("Reset session constraints.");
+      return;
+    }
+
+    const nextConstraints = applyConstraintUpdates(options.currentConstraints, parsed.updates);
+    options.setConstraints(nextConstraints);
+    options.appendSystemMessage(
+      `Updated session constraints\n\n${formatConstraintsSummary(nextConstraints)}`
+    );
+    options.updateSidebar("Updated session constraints.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    options.appendEntry(
+      "error",
+      [
+        "Invalid constraints command.",
+        "",
+        message,
+        "",
+        "Examples:",
+        "- :constraints",
+        "- :constraints reset",
+        "- :constraints read-only=true",
+        "- :constraints shell=deny network=deny",
+        "- :constraints max-files=2 require-validation=true",
+      ].join("\n")
+    );
+    options.updateSidebar("Invalid constraints command.");
   }
 }
 

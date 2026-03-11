@@ -1,5 +1,17 @@
 import { expect, test } from "bun:test";
 
+import {
+  applyConstraintUpdates,
+  checkManualShellConstraints,
+  checkToolConstraints,
+  createSessionConstraintState,
+  formatConstraintsSummary,
+  parseConstraintsCommand,
+  recordSuccessfulEdit,
+  recordSuccessfulShellCommand,
+} from "../lib/agent/constraints.ts";
+import { buildCritiquePrompt, buildReviewPrompt } from "../lib/agent/commands.ts";
+
 import type { ResponseChunk, Message } from "../lib/llm.ts";
 import {
   createAssistantStreamState,
@@ -27,6 +39,93 @@ import {
 
 test("normalizeWhitespace collapses runs and trims", () => {
   expect(normalizeWhitespace("  hello\n\t world  ")).toBe("hello world");
+});
+
+test("constraints command parsing and formatting support show reset and updates", () => {
+  expect(parseConstraintsCommand("")).toEqual({ kind: "show" });
+  expect(parseConstraintsCommand("reset")).toEqual({ kind: "reset" });
+  expect(parseConstraintsCommand("read-only=true shell=deny max-files=2 require-validation=true")).toEqual({
+    kind: "update",
+    updates: {
+      readOnly: true,
+      shellPolicy: "deny",
+      maxFiles: 2,
+      requireValidation: true,
+    },
+  });
+
+  expect(
+    formatConstraintsSummary(
+      applyConstraintUpdates(createSessionConstraintState().constraints, {
+        readOnly: true,
+        networkPolicy: "deny",
+      })
+    )
+  ).toBe("read-only=true, shell=ask, network=deny, max-files=none, require-validation=false");
+});
+
+test("constraint enforcement blocks edits shell and network when configured", () => {
+  const state = createSessionConstraintState();
+  state.constraints.readOnly = true;
+  expect(
+    checkToolConstraints({
+      toolName: "apply-patch",
+      targetPath: "/tmp/example.ts",
+      state,
+    })
+  ).toContain("read-only mode");
+
+  state.constraints.readOnly = false;
+  state.constraints.shellPolicy = "deny";
+  expect(checkManualShellConstraints(state)).toContain("shell=deny");
+  expect(
+    checkToolConstraints({
+      toolName: "run_shell_command",
+      targetPath: null,
+      state,
+    })
+  ).toContain("shell=deny");
+
+  state.constraints.networkPolicy = "deny";
+  expect(
+    checkToolConstraints({
+      toolName: "web_fetch",
+      targetPath: null,
+      state,
+    })
+  ).toContain("network=deny");
+});
+
+test("max-files and validation tracking work across edits and validation commands", () => {
+  const state = createSessionConstraintState();
+  state.constraints.maxFiles = 1;
+
+  recordSuccessfulEdit("/tmp/one.ts", state);
+  expect(state.validationFresh).toBe(false);
+  expect(
+    checkToolConstraints({
+      toolName: "apply-patch",
+      targetPath: "/tmp/two.ts",
+      state,
+    })
+  ).toContain("max-files=1");
+
+  recordSuccessfulShellCommand("bun typecheck", state);
+  expect(state.validationFresh).toBe(true);
+});
+
+test("critique and review prompts include the expected framing", () => {
+  expect(buildCritiquePrompt("review this api")).toContain("Strongest objections");
+  expect(
+    buildReviewPrompt({
+      constraints: createSessionConstraintState().constraints,
+      validationFresh: false,
+      editedFiles: ["lib/agent/commands.ts"],
+      upmergeMode: "worktree",
+      upmergeNote: "Agent edits are isolated.",
+      pendingPaths: ["lib/agent/commands.ts"],
+    })
+  ).toContain("Risk areas");
 });
 
 test("appendChunkWithLimit appends until the shared limit", () => {

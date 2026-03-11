@@ -76,6 +76,22 @@ export type ApprovalTarget = {
 export type AutoScrollState = "follow" | "paused";
 export type ModelPresetName = keyof typeof MODEL_PRESETS;
 
+export type ConstraintAccessPolicy = "allow" | "ask" | "deny";
+
+export type SessionConstraints = {
+  readOnly: boolean;
+  shellPolicy: ConstraintAccessPolicy;
+  networkPolicy: ConstraintAccessPolicy;
+  maxFiles: number | null;
+  requireValidation: boolean;
+};
+
+export type SessionConstraintState = {
+  constraints: SessionConstraints;
+  editedFiles: Set<string>;
+  validationFresh: boolean;
+};
+
 export type PersistedConfig = {
   currentModel?: string;
 };
@@ -202,4 +218,5 @@ export type SidebarPresentationState = {
   autoScrollState: AutoScrollState;
   activeShellSession: boolean;
   insertDraft: string;
+  constraintsSummary: string | null;
 };

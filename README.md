@@ -25,7 +25,9 @@ Unlike browser-first coding assistants, `agent-cli` keeps the conversation close
 - Workspace-scoped conversation history and persisted configuration
 - Local skill indexing for reusable implementation guidance
 - Git worktree support for isolating edits before merging them back
-- Commands for model switching, planning, summarizing, indexing, and worktree management
+- Session-scoped safety constraints for read-only, shell, network, max-file, and validation-aware workflows
+- Critique and review commands for challenging plans and auditing the current session state
+- Commands for model switching, planning, summarizing, indexing, constraints, critique, review, and worktree management
 
 ## How it differs from Claude Code / Codex
 
@@ -107,6 +109,49 @@ Start the CLI from the repository root:
 ```bash
 bun run agent.ts
 ```
+
+## Useful commands
+
+Inside the TUI, some of the most useful commands are:
+
+- `:model` to open the model picker
+- `:plan` to inspect `.agents/PLAN.md`
+- `:summarize` to compress the current conversation history
+- `:constraints` to show the current session safety settings
+- `:constraints read-only=true shell=deny` to tighten the session guardrails
+- `:critique <idea>` to ask the agent to challenge a design or plan
+- `:review` to review the current session state, pending changes, and validation status
+- `:merge` / `:worktree` for worktree-oriented edit flows
+
+### Session constraints
+
+`agent-cli` can enforce session-scoped guardrails without requiring repo configuration.
+
+Supported settings:
+
+- `read-only=true|false`
+- `shell=allow|ask|deny`
+- `network=allow|ask|deny`
+- `max-files=<number>`
+- `require-validation=true|false`
+
+Examples:
+
+```text
+:constraints
+:constraints read-only=true
+:constraints shell=deny network=deny
+:constraints max-files=2 require-validation=true
+:constraints reset
+```
+
+Notes:
+
+- `shell=deny` blocks both tool-driven shell execution and manual shell commands entered through the TUI.
+- `network=deny` blocks web fetch/search tools.
+- `max-files` limits edits to a fixed number of unique files in the current session.
+- validation freshness is tracked after edits and refreshed by `bun typecheck` or `bun test`.
+- constraints are session-scoped in the current implementation.
 
 ## Convenience alias
 

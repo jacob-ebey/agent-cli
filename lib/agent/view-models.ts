@@ -150,6 +150,7 @@ function createSessionSidebarViewModel(
       `Messages: ${numberFormatter.format(state.entriesCount)}`,
       `Window: ${state.tokenWindowLabel}`,
       `Upmerges: ${numberFormatter.format(state.upmergeCount)}`,
+      ...(state.constraintsSummary ? [`Constraints: ${state.constraintsSummary}`] : []),
       "",
       state.upmergeNote,
       "",
@@ -219,7 +220,7 @@ export function createComposerHintContent(state: SidebarPresentationState) {
   }
 
   if (state.mode === "command") {
-    return "Command mode. Run :help, :agents-md, :clear, :history, :index, :model, :plan, :plan copy, :summarize, or :quit, or press Esc to return to normal.";
+    return "Command mode. Run :help, :agents-md, :clear, :history, :index, :model, :plan, :plan copy, :critique, :review, :constraints, :summarize, or :quit, or press Esc to return to normal.";
   }
 
   if (state.mode === "shell") {
