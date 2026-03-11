@@ -45,6 +45,7 @@ const MODEL_PRESETS = {
   anthropic: "anthropic:claude-sonnet-4-6",
   openai: "openai:gpt-5.4",
   google: "google:gemini-3.1-pro-preview",
+  ollama: "ollama:qwen3:latest",
 } as const;
 const CONFIG_DIRECTORY =
   process.platform === "win32"
@@ -1520,6 +1521,7 @@ function describeModelOptions() {
     ...presetLines,
     "",
     "You can also run `:model your-model-id` to set any Shopify gateway model directly.",
+    "Use `:model ollama:your-local-model` to target a local Ollama model.",
   ].join("\n");
 }
 

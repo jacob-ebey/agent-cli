@@ -74,7 +74,9 @@ function normalizeOpenAIBaseURL(value: string) {
 
 const openAIBase = process.env.OPENAI_API_BASE;
 const openAIKey = process.env.OPENAI_API_KEY;
+const ollamaBase = process.env.OLLAMA_API_BASE;
 const DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small";
+const DEFAULT_OLLAMA_BASE = "http://127.0.0.1:11434";
 
 if (!openAIBase) {
   throw new Error("Missing OPENAI_API_BASE environment variable.");
@@ -90,6 +92,29 @@ const shopifyGateway = createOpenAICompatible<string, never, string, never>({
   apiKey: openAIKey,
   includeUsage: true,
 });
+
+const ollamaGateway = createOpenAICompatible<string, never, string, never>({
+  name: "ollama",
+  baseURL: normalizeOpenAIBaseURL(ollamaBase?.trim() || DEFAULT_OLLAMA_BASE),
+  includeUsage: true,
+});
+
+function isOllamaModel(model: string) {
+  return model.startsWith("ollama:");
+}
+
+function stripModelProviderPrefix(model: string) {
+  const separatorIndex = model.indexOf(":");
+  return separatorIndex === -1 ? model : model.slice(separatorIndex + 1);
+}
+
+function getChatModel(model: string) {
+  if (isOllamaModel(model)) {
+    return ollamaGateway.chatModel(stripModelProviderPrefix(model));
+  }
+
+  return shopifyGateway.chatModel(model);
+}
 
 export function getEmbeddingModelId() {
   return process.env.OPENAI_EMBEDDING_MODEL?.trim() || DEFAULT_EMBEDDING_MODEL;
@@ -131,7 +156,7 @@ export function streamResponse({
   abortSignal?: AbortSignal;
 }) {
   const result = streamText({
-    model: shopifyGateway.chatModel(model),
+    model: getChatModel(model),
     messages: sanitizeMessages(messages),
     abortSignal,
     tools: Object.fromEntries(
