@@ -156,6 +156,10 @@ function parsePersistedConversationState(
             typeof value.workspaceSession.note === "string"
               ? value.workspaceSession.note
               : "Agent edits are isolated in a git worktree until you upmerge them.",
+          conversationId:
+            typeof value.workspaceSession.conversationId === "string"
+              ? value.workspaceSession.conversationId
+              : undefined,
           trackedFiles: value.workspaceSession.trackedFiles.flatMap((entry) => {
             if (!isRecord(entry) || typeof entry.relativePath !== "string") {
               return [];

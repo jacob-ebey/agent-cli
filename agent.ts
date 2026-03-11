@@ -165,6 +165,7 @@ import {
   revertRelativePath,
   restoreWorkspaceSession,
   resolveOriginalWorkspacePath,
+  setConversationId,
   setWorkspaceSessionStorageRoot,
   upmergeAll,
   upmergeRelativePath,
@@ -239,7 +240,9 @@ const transcriptHistory: PersistedTranscriptEntry[] = [
 let activeConversationId = initialConversationState.id;
 let activeConversationCreatedAt = initialConversationState.createdAt;
 configureConversationWorkspace(activeConversationId);
+setConversationId(activeConversationId);
 restoreWorkspaceSession(initialConversationState.workspaceSession);
+setConversationId(activeConversationId);
 
 let nextIdCounter = 0;
 let busy = false;
@@ -290,7 +293,7 @@ let activeStreamAbortController: AbortController | null = null;
 let activeShellProcess: ChildProcess | null = null;
 let activeThinkingIndicator: NodeJS.Timeout | null = null;
 let thinkingFrameIndex = 0;
-let latestSidebarNote = "Idle.";
+let latestSidebarNote = "Ready for your next prompt.";
 const approvedEditTargets = new Set<string>();
 let activeApproval: PendingApproval | null = null;
 const queuedApprovals: PendingApproval[] = [];
@@ -666,9 +669,12 @@ async function runUpmergeSelection(
   try {
     if (action === "auto-resolve") {
       const selectedPath = selectedItem?.path;
+      const conflictPhase = selectedItem?.conflictPhase;
       const statusMessage = selectedPath
-        ? `Auto-resolving ${selectedPath} with ${currentModel}...`
-        : `Auto-resolving worktree conflict with ${currentModel}...`;
+        ? conflictPhase === "publish"
+          ? `Auto-resolving publish conflict for ${selectedPath} with ${currentModel} using conversation history...`
+          : `Auto-resolving worktree merge conflict for ${selectedPath} with ${currentModel}...`
+        : `Auto-resolving selected conflict with ${currentModel}...`;
       updateSidebar(statusMessage);
       appendSystemMessage(statusMessage);
       renderer.requestRender();
@@ -1064,11 +1070,7 @@ function buildSidebarPresentationState(): SidebarPresentationState {
   };
 }
 
-function defaultSidebarNote() {
-  return streamPhase === "idle" ? "Ready for your next prompt." : `Status: ${streamPhase}.`;
-}
-
-function updateSidebar(note = defaultSidebarNote()) {
+function updateSidebar(note = "Ready for your next prompt.") {
   latestSidebarNote = note;
   const sidebarViewModel = createSidebarViewModel(
     buildSidebarPresentationState(),
@@ -1177,7 +1179,9 @@ function replaceConversationState(state: PersistedConversationState) {
   activeConversationCreatedAt = state.createdAt;
   latestTotalTokensUsed = null;
   configureConversationWorkspace(state.id);
+  setConversationId(state.id);
   restoreWorkspaceSession(state.workspaceSession);
+  setConversationId(state.id);
   conversation.splice(0, conversation.length, ...structuredClone(state.conversation));
   transcriptHistory.splice(0, transcriptHistory.length, ...structuredClone(state.transcript));
   clearApprovalQueue();
@@ -1588,7 +1592,11 @@ async function runAgentLoop() {
   } finally {
     setBusy(false);
     updateComposerHint();
-    updateSidebar(streamAborted ? "Stream aborted." : undefined);
+    updateSidebar(
+      streamAborted
+        ? "Stream aborted. Ready for your next prompt."
+        : "Ready for your next prompt."
+    );
     renderer.requestRender();
     scrollToBottom();
   }

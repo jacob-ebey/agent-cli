@@ -2,6 +2,7 @@ import type { ConversationHistoryItem, ModelMenuItem, UpmergeMenuItem } from "./
 import { buildConversationPreview, formatConversationTimestamp } from "./utils.ts";
 import { buildModelMenuContent, computeModelViewportTop, filterModelItems, moveModelSelection, normalizeModelSelection, selectedModelItem } from "./model-menu.ts";
 import {
+  autoResolvePublishConflict,
   autoResolveSyncDownConflict,
   getUpmergePreview,
   getUpmergeStatus,
@@ -137,10 +138,16 @@ export async function runUpmergeSelection(options: {
       return { kind: "empty" as const };
     }
 
-    message = await autoResolveSyncDownConflict({
-      relativePath: selected.path,
-      model: options.currentModel,
-    });
+    message =
+      selected.conflictPhase === "publish"
+        ? await autoResolvePublishConflict({
+            relativePath: selected.path,
+            model: options.currentModel,
+          })
+        : await autoResolveSyncDownConflict({
+            relativePath: selected.path,
+            model: options.currentModel,
+          });
   } else {
     if (!selected.path) {
       return { kind: "empty" as const };

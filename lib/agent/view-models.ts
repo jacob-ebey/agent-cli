@@ -89,6 +89,7 @@ function createUpmergeSidebarViewModel(
       "",
       "Shortcuts",
       "Enter  upmerge selected item",
+      "a      ask agent to auto-resolve selected text conflict",
       "r      revert selected file",
       "m      mark selected conflict resolved",
       "1      resolve selected conflict with main",
@@ -190,7 +191,7 @@ export function createComposerHintContent(state: SidebarPresentationState) {
   }
 
   if (state.upmergeMenuOpen) {
-    return "Upmerge menu open. Enter upmerges the selection, r reverts a selected file, m marks a conflict resolved, 1 keeps main, 2 keeps worktree, and u/Esc closes it.";
+    return "Upmerge menu open. Enter upmerges the selection, a asks the agent to auto-resolve the selected text conflict, r reverts a selected file, m marks a conflict resolved, 1 keeps main, 2 keeps worktree, and u/Esc closes it.";
   }
 
   if (state.historyMenuOpen) {

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { generateTextResponse, type Message } from "./lib/llm.ts";
+import { loadConversationHistory } from "./lib/agent/conversation-store.ts";
 
 const DEV_NULL_PATH = "/dev/null";
 
@@ -16,6 +17,7 @@ type UpmergeConflictRecord = {
   type: "text" | "binary";
   status: "pending";
   phase?: "publish" | "sync-down";
+  sourceRef?: string;
 };
 
 const UPMERGE_IGNORED_PATHS = new Set([".agents/PLAN.md"]);
@@ -43,6 +45,7 @@ type SessionState =
       initialized: true;
       mode: "worktree";
       note: string;
+      conversationId: string | null;
       trackedFiles: Map<string, BaselineRecord>;
       conflicts: Map<string, UpmergeConflictRecord>;
       gitRoot: string;
@@ -56,6 +59,7 @@ export type PersistedWorkspaceSession = {
   version: 1;
   mode: "worktree";
   note: string;
+  conversationId?: string;
   trackedFiles: Array<{
     relativePath: string;
     baselinePath: string | null;
@@ -102,6 +106,7 @@ function createInitialSessionState(): SessionState {
 export type WorkspaceSessionManager = {
   getOriginalWorkspaceRoot: () => string;
   setWorkspaceSessionStorageRoot: (storageRoot: string | null) => void;
+  setConversationId: (conversationId: string | null) => void;
   captureWorkspaceSession: () => PersistedWorkspaceSession | null;
   restoreWorkspaceSession: (session: PersistedWorkspaceSession | null) => void;
   getActiveWorkspaceRoot: () => string;
@@ -116,6 +121,11 @@ export type WorkspaceSessionManager = {
     branch?: string;
   }) => Promise<string>;
   autoResolveSyncDownConflict: (options: {
+    relativePath: string;
+    model: string;
+    abortSignal?: AbortSignal;
+  }) => Promise<string>;
+  autoResolvePublishConflict: (options: {
     relativePath: string;
     model: string;
     abortSignal?: AbortSignal;
@@ -140,6 +150,7 @@ export function createWorkspaceSessionManager(workspaceRoot = process.cwd()): Wo
   let detectedGitRoot: string | null | undefined;
   let ensureSessionPromise: Promise<SessionState> | null = null;
   let sessionStorageRoot: string | null = null;
+  let activeConversationId: string | null = null;
 
   function toPortablePath(relativePath: string) {
     return relativePath.split(path.sep).join("/");
@@ -381,6 +392,7 @@ async function createWorktreeSession(gitRoot: string) {
     initialized: true,
     mode: "worktree",
     note: "Agent edits are isolated in a git worktree until you upmerge them.",
+    conversationId: activeConversationId,
     trackedFiles: sessionState.trackedFiles,
     conflicts: sessionState.conflicts,
     gitRoot,
@@ -578,6 +590,82 @@ async function getPatchForRelativePath(relativePath: string) {
   return await buildDiffFromPaths(relativePath, record.baselinePath, worktreePath);
 }
 
+async function getCurrentBranchRef(cwd: string) {
+  const branchResult = await runCommand("git", ["rev-parse", "--abbrev-ref", "HEAD"], cwd);
+  if (branchResult.exitCode !== 0) {
+    throw new Error(branchResult.stderr.trim() || "Failed to determine the current source branch.");
+  }
+
+  const currentBranch = branchResult.stdout.trim();
+  return currentBranch === "HEAD" ? "HEAD" : `origin/${currentBranch}`;
+}
+
+async function buildConversationContextForConflictResolution(conversationId: string | null) {
+  if (!conversationId) {
+    return "No conversation history was available for this worktree session.";
+  }
+
+  const history = await loadConversationHistory();
+  const conversation = history.find((entry) => entry.id === conversationId) ?? null;
+  if (!conversation) {
+    return `Conversation history for session ${conversationId} was not found.`;
+  }
+
+  const transcript = conversation.transcript
+    .filter((entry) => entry.role === "user" || entry.role === "assistant" || entry.role === "error")
+    .slice(-30)
+    .map((entry) => {
+      const label = entry.role.toUpperCase();
+      return `[${label}]\n${entry.content}`;
+    })
+    .join("\n\n");
+
+  return transcript || "Conversation history existed but did not contain user/assistant transcript entries.";
+}
+
+function buildPublishConflictResolutionPrompt(options: {
+  relativePath: string;
+  sourceRef: string;
+  conflictedText: string;
+  baseText: string;
+  worktreeText: string;
+  mainText: string;
+  conversationContext: string;
+}) {
+  return [
+    `You are resolving an upmerge conflict for ${options.relativePath}.`,
+    `The conflict happened while publishing agent worktree changes after syncing with ${options.sourceRef}.`,
+    "Use the conversation history to infer user intent and prefer the result that best satisfies the active task.",
+    "Return only the final resolved file contents with no markdown fences, commentary, or explanation.",
+    "Preserve valid syntax and combine both sides when appropriate.",
+    "",
+    "Conversation history:",
+    "<<<CONVERSATION>>>",
+    options.conversationContext,
+    "<<<END CONVERSATION>>>",
+    "",
+    "Baseline before either side changed:",
+    "<<<BASE>>>",
+    options.baseText,
+    "<<<END BASE>>>",
+    "",
+    "Agent/worktree version:",
+    "<<<WORKTREE>>>",
+    options.worktreeText,
+    "<<<END WORKTREE>>>",
+    "",
+    "Current main branch workspace version:",
+    "<<<MAIN>>>",
+    options.mainText,
+    "<<<END MAIN>>>",
+    "",
+    "Current conflicted file with markers:",
+    "<<<CONFLICTED>>>",
+    options.conflictedText,
+    "<<<END CONFLICTED>>>",
+  ].join("\n");
+}
+
 async function readWorkspaceVersion(targetPath: string | null) {
   if (targetPath === null) {
     return {
@@ -670,6 +758,13 @@ function setWorkspaceSessionStorageRoot(storageRoot: string | null) {
   sessionStorageRoot = storageRoot;
 }
 
+function setConversationId(conversationId: string | null) {
+  activeConversationId = conversationId;
+  if (sessionState.mode === "worktree") {
+    sessionState.conversationId = conversationId;
+  }
+}
+
 function captureWorkspaceSession(): PersistedWorkspaceSession | null {
   if (sessionState.mode !== "worktree") {
     return null;
@@ -679,6 +774,7 @@ function captureWorkspaceSession(): PersistedWorkspaceSession | null {
     version: 1,
     mode: "worktree",
     note: sessionState.note,
+    conversationId: sessionState.conversationId ?? undefined,
     trackedFiles: [...sessionState.trackedFiles.entries()].map(
       ([relativePath, record]) => ({
         relativePath,
@@ -713,10 +809,13 @@ function restoreWorkspaceSession(session: PersistedWorkspaceSession | null) {
     return;
   }
 
+  activeConversationId = session.conversationId ?? null;
+
   sessionState = {
     initialized: true,
     mode: "worktree",
     note: session.note,
+    conversationId: session.conversationId ?? null,
     trackedFiles: new Map(
       session.trackedFiles.map((entry) => [
         entry.relativePath,
@@ -986,19 +1085,7 @@ async function mergeSourceIntoWorktree(options?: {
   }
 
   if (!resolvedSource) {
-    const branchResult = await runCommand(
-      "git",
-      ["rev-parse", "--abbrev-ref", "HEAD"],
-      ORIGINAL_WORKSPACE_ROOT
-    );
-    if (branchResult.exitCode !== 0) {
-      throw new Error(
-        branchResult.stderr.trim() || "Failed to determine the current source branch."
-      );
-    }
-
-    const currentBranch = branchResult.stdout.trim();
-    resolvedSource = currentBranch === "HEAD" ? "HEAD" : `origin/${currentBranch}`;
+    resolvedSource = await getCurrentBranchRef(ORIGINAL_WORKSPACE_ROOT);
   }
 
   const checkpoint = await commitTrackedWorktreeFilesForMerge(resolvedSource);
@@ -1178,15 +1265,24 @@ async function getUpmergePreview(relativePath?: string): Promise<string> {
         ].join("\n");
       }
 
-      const originalPath = path.join(ORIGINAL_WORKSPACE_ROOT, relativePath);
-      const current = await readWorkspaceVersion(originalPath);
+      if (sessionState.mode !== "worktree") {
+        return "Upmerge conflict preview is unavailable because the worktree session is inactive.";
+      }
+
+      const worktreePath = path.join(sessionState.worktreeWorkspaceRoot, relativePath);
+      const current = await readWorkspaceVersion(worktreePath);
       const text = current.content?.toString("utf8") ?? "";
       return [
         `Text upmerge conflict: ${relativePath}`,
         "",
-        "The main workspace file currently contains conflict markers.",
-        "Resolve the file in the main workspace, then use mark-resolved.",
-        "Quick actions: 1 keep main, 2 keep worktree, r revert agent changes.",
+        "Main and worktree both changed this file, and conflict markers were copied into the worktree.",
+        "Use a to let the agent resolve it from conversation history, or resolve it manually in the worktree and then mark it resolved.",
+        "Quick actions:",
+        "- 1 / accept-main: keep the current main workspace version",
+        "- 2 / accept-worktree: overwrite main with the current worktree version",
+        "- a / auto-resolve: ask the current model to resolve from conversation history + base/worktree/main",
+        "- m / mark-resolved: after manually resolving in the worktree or main workspace",
+        "- r / revert: discard the agent/worktree side",
         "",
         buildConflictPreview(text),
       ].join("\n");
@@ -1287,12 +1383,14 @@ async function upmergeRelativePath(relativePath: string) {
   );
 
   if (merged.hasConflicts) {
+    await writeWorkspaceVersion(worktreePath, merged.content);
     setConflictRecord(relativePath, {
       type: "text",
       status: "pending",
       phase: "publish",
+      sourceRef: await getCurrentBranchRef(ORIGINAL_WORKSPACE_ROOT),
     });
-    return `Upmerge conflict for ${relativePath}: publishing was blocked because main changed after the worktree baseline. Merge main into the worktree again and resolve there before retrying.`;
+    return `Upmerge conflict for ${relativePath}: publishing was blocked because main changed after the worktree baseline. Conflict markers were copied into the worktree so an agent can resolve them there using conversation history.`;
   }
 
   await writeWorkspaceVersion(
@@ -1569,6 +1667,79 @@ async function autoResolveSyncDownConflict(options: {
   return `Automatically resolved worktree merge conflict for ${options.relativePath} with model ${options.model}.`;
 }
 
+async function autoResolvePublishConflict(options: {
+  relativePath: string;
+  model: string;
+  abortSignal?: AbortSignal;
+}) {
+  const status = await getUpmergeStatus();
+  if (status.mode !== "worktree") {
+    return status.note;
+  }
+  if (sessionState.mode !== "worktree") {
+    return status.note;
+  }
+
+  const conflict = getConflictRecord(options.relativePath);
+  if (!conflict || conflict.phase !== "publish") {
+    return `No pending publish conflict for ${options.relativePath}.`;
+  }
+  if (conflict.type !== "text") {
+    return `Automatic resolution is only supported for text publish conflicts. ${options.relativePath} is ${conflict.type}.`;
+  }
+
+  const record = getBaselineRecord(options.relativePath);
+  if (!record) {
+    return `Cannot auto-resolve ${options.relativePath}: no tracked baseline is available.`;
+  }
+
+  const originalPath = path.join(ORIGINAL_WORKSPACE_ROOT, options.relativePath);
+  const worktreePath = path.join(sessionState.worktreeWorkspaceRoot, options.relativePath);
+  const [baseline, main, conflicted] = await Promise.all([
+    readWorkspaceVersion(record.baselinePath),
+    readWorkspaceVersion(originalPath),
+    readWorkspaceVersion(worktreePath),
+  ]);
+
+  if (!conflicted.content || !hasConflictMarkers(conflicted.content)) {
+    return `Cannot auto-resolve ${options.relativePath}: the worktree file no longer contains conflict markers.`;
+  }
+
+  const [baseText, worktreeText, mainText, conversationContext] = await Promise.all([
+    Promise.resolve(baseline.content?.toString("utf8") ?? ""),
+    readConflictStageBlob(options.relativePath, 2),
+    readConflictStageBlob(options.relativePath, 3),
+    buildConversationContextForConflictResolution(sessionState.conversationId),
+  ]);
+
+  const prompt = buildPublishConflictResolutionPrompt({
+    relativePath: options.relativePath,
+    sourceRef: conflict.sourceRef ?? (await getCurrentBranchRef(ORIGINAL_WORKSPACE_ROOT)),
+    conflictedText: conflicted.content.toString("utf8"),
+    baseText,
+    worktreeText: worktreeText ?? "",
+    mainText: mainText ?? main.content?.toString("utf8") ?? "",
+    conversationContext,
+  });
+
+  const resolvedText = await generateTextResponse({
+    model: options.model,
+    messages: [{ role: "user", content: prompt } satisfies Message],
+    abortSignal: options.abortSignal,
+  });
+
+  await fs.writeFile(worktreePath, resolvedText, "utf8");
+  if (hasConflictMarkers(Buffer.from(resolvedText, "utf8"))) {
+    return `Automatic resolution for ${options.relativePath} still contains conflict markers. Review and resolve manually.`;
+  }
+
+  await writeWorkspaceVersion(originalPath, Buffer.from(resolvedText, "utf8"));
+  await stageResolvedWorktreePath(options.relativePath);
+  clearConflictRecord(options.relativePath);
+  await advanceBaseline(options.relativePath);
+  return `Automatically resolved publish conflict for ${options.relativePath} with model ${options.model}.`;
+}
+
 async function resolveUpmergeConflict(
   relativePath: string,
   strategy: UpmergeResolutionStrategy
@@ -1665,6 +1836,7 @@ async function cleanupWorkspaceSession(
   return {
     getOriginalWorkspaceRoot,
     setWorkspaceSessionStorageRoot,
+    setConversationId,
     captureWorkspaceSession,
     restoreWorkspaceSession,
     getActiveWorkspaceRoot,
@@ -1675,6 +1847,7 @@ async function cleanupWorkspaceSession(
     trackEditTarget,
     mergeSourceIntoWorktree,
     autoResolveSyncDownConflict,
+    autoResolvePublishConflict,
     getUpmergeStatus,
     getUpmergePreview,
     upmergeRelativePath,
@@ -1690,6 +1863,7 @@ const defaultWorkspaceSessionManager = createWorkspaceSessionManager();
 export const {
   getOriginalWorkspaceRoot,
   setWorkspaceSessionStorageRoot,
+  setConversationId,
   captureWorkspaceSession,
   restoreWorkspaceSession,
   getActiveWorkspaceRoot,
@@ -1700,6 +1874,7 @@ export const {
   trackEditTarget,
   mergeSourceIntoWorktree,
   autoResolveSyncDownConflict,
+  autoResolvePublishConflict,
   getUpmergeStatus,
   getUpmergePreview,
   upmergeRelativePath,
