@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, mock, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -61,6 +61,10 @@ async function loadWorktreeModuleForRepo() {
   return await import(path.join(repoRoot, "worktree.ts"));
 }
 
+async function loadMenusModule() {
+  return await import(path.join(repoRoot, "lib/agent/menus.ts"));
+}
+
 afterEach(async () => {
   for (const dir of tempDirs.splice(0)) {
     await fs.rm(dir, { recursive: true, force: true });
@@ -86,7 +90,7 @@ test("agent entrypoint imports its local modules and keeps the quit command wire
   expect(source).toMatch(/renderer\.destroy\(\)/);
 });
 
-test("merge source into worktree produces a realistic sync-down conflict with staged worktree edits", async () => {
+test("merge source into worktree works on a clean repo after upstream advances", async () => {
   const repoPath = await createTempGitRepo({
     "notes.txt": ["start", "shared", "end", ""].join("\n"),
   });
@@ -107,11 +111,11 @@ test("merge source into worktree produces a realistic sync-down conflict with st
   await runGit(["config", "user.email", "agent-cli@example.com"], upstreamCheckout);
   await fs.writeFile(
     path.join(upstreamCheckout, "notes.txt"),
-    ["start", "main change", "end", ""].join("\n"),
+    ["start", "remote update", "end", ""].join("\n"),
     "utf8"
   );
   await runGit(["add", "notes.txt"], upstreamCheckout);
-  await runGit(["commit", "-m", "main change"], upstreamCheckout);
+  await runGit(["commit", "-m", "remote update"], upstreamCheckout);
   await runGit(["push", "origin", "main"], upstreamCheckout);
   await runGit(["fetch", "origin", "main"], repoPath);
 
@@ -123,6 +127,55 @@ test("merge source into worktree produces a realistic sync-down conflict with st
   await worktree.prepareWorkspaceForEdit();
 
   const mainPath = worktree.resolveOriginalWorkspacePath("notes.txt");
+  const worktreePath = path.join(worktree.getActiveWorkspaceRoot(), "notes.txt");
+
+  const result = await worktree.mergeSourceIntoWorktree({ sourceRef: "origin/main" });
+  expect(result).toContain("Merged source ref `origin/main` into the agent worktree.");
+
+  expect(await fs.readFile(mainPath, "utf8")).toBe(["start", "shared", "end", ""].join("\n"));
+  expect(await fs.readFile(worktreePath, "utf8")).toBe(["start", "remote update", "end", ""].join("\n"));
+
+  await worktree.cleanupWorkspaceSession();
+  worktree.restoreWorkspaceSession(null);
+});
+
+async function createSyncDownConflictFixture() {
+  const repoPath = await createTempGitRepo({
+    "notes.txt": ["start", "shared", "end", ""].join("\n"),
+  });
+  await runGit(["branch", "-M", "main"], repoPath);
+
+  const upstreamPath = `${repoPath}-upstream-conflict.git`;
+  await runGit(["init", "--bare", upstreamPath], repoPath);
+  await runGit(["remote", "add", "origin", upstreamPath], repoPath);
+  await runGit(["push", "-u", "origin", "main"], repoPath);
+
+  const upstreamCheckout = await fs.mkdtemp(
+    path.join(await fs.realpath(os.tmpdir()), "agent-cli-upstream-conflict-")
+  );
+  tempDirs.push(upstreamCheckout);
+  await runGit(["clone", upstreamPath, upstreamCheckout], repoPath);
+  await runGit(["checkout", "main"], upstreamCheckout);
+  await runGit(["config", "user.name", "agent-cli tests"], upstreamCheckout);
+  await runGit(["config", "user.email", "agent-cli@example.com"], upstreamCheckout);
+  await fs.writeFile(
+    path.join(upstreamCheckout, "notes.txt"),
+    ["start", "main change", "end", ""].join("\n"),
+    "utf8"
+  );
+  await runGit(["add", "notes.txt"], upstreamCheckout);
+  await runGit(["commit", "-m", "main change"], upstreamCheckout);
+  await runGit(["push", "origin", "main"], upstreamCheckout);
+  await runGit(["fetch", "origin", "main"], repoPath);
+
+  const worktreeModule = await loadWorktreeModuleForRepo();
+  const worktree = worktreeModule.createWorkspaceSessionManager(path.resolve(repoPath));
+
+  worktree.setWorkspaceSessionStorageRoot(path.join(repoPath, ".session-conflict"));
+  worktree.restoreWorkspaceSession(null);
+  await worktree.prepareWorkspaceForEdit();
+
+  const mainPath = worktree.resolveOriginalWorkspacePath("notes.txt");
   await worktree.trackEditTarget("notes.txt");
   const worktreePath = path.join(worktree.getActiveWorkspaceRoot(), "notes.txt");
   await fs.writeFile(worktreePath, ["start", "worktree change", "end", ""].join("\n"), "utf8");
@@ -130,6 +183,12 @@ test("merge source into worktree produces a realistic sync-down conflict with st
   const result = await worktree.mergeSourceIntoWorktree({ sourceRef: "origin/main" });
   expect(result).toContain("Merge conflict while merging `origin/main` into the agent worktree.");
   expect(result).toContain("Resolve conflicts in the worktree before publishing changes back to the main workspace.");
+
+  return { repoPath, worktree, mainPath, worktreePath };
+}
+
+test("merge source into worktree creates a realistic sync-down conflict from local worktree edits", async () => {
+  const { worktree, mainPath, worktreePath } = await createSyncDownConflictFixture();
 
   expect(await fs.readFile(mainPath, "utf8")).toBe(["start", "shared", "end", ""].join("\n"));
 
@@ -153,6 +212,49 @@ test("merge source into worktree produces a realistic sync-down conflict with st
 
   const blockedPublish = await worktree.upmergeRelativePath("notes.txt");
   expect(blockedPublish).toContain("Resolve it in the worktree before publishing");
+
+  await worktree.cleanupWorkspaceSession();
+  worktree.restoreWorkspaceSession(null);
+});
+
+test("sync-down accept-main resolves the conflict via git stages", async () => {
+  const { worktree, mainPath, worktreePath } = await createSyncDownConflictFixture();
+
+  const resolution = await worktree.resolveUpmergeConflict("notes.txt", "accept-main");
+  expect(resolution).toBe(
+    "Resolved worktree merge conflict for notes.txt by taking the main/source version into the worktree."
+  );
+
+  expect(await fs.readFile(mainPath, "utf8")).toBe(["start", "shared", "end", ""].join("\n"));
+  expect(await fs.readFile(worktreePath, "utf8")).toBe(["start", "main change", "end", ""].join("\n"));
+
+  expect(await worktree.getUpmergeStatus()).toEqual({
+    mode: "worktree",
+    note: "Agent edits are isolated in a git worktree until you upmerge them.",
+    pendingFiles: ["notes.txt"],
+    conflictedFiles: [],
+  });
+
+  await worktree.cleanupWorkspaceSession();
+  worktree.restoreWorkspaceSession(null);
+});
+
+test("sync-down accept-worktree resolves the conflict via git stages", async () => {
+  const { worktree, worktreePath } = await createSyncDownConflictFixture();
+
+  const resolution = await worktree.resolveUpmergeConflict("notes.txt", "accept-worktree");
+  expect(resolution).toBe(
+    "Resolved worktree merge conflict for notes.txt by keeping the current worktree version."
+  );
+
+  expect(await fs.readFile(worktreePath, "utf8")).toBe(["start", "worktree change", "end", ""].join("\n"));
+
+  expect(await worktree.getUpmergeStatus()).toEqual({
+    mode: "worktree",
+    note: "Agent edits are isolated in a git worktree until you upmerge them.",
+    pendingFiles: ["notes.txt"],
+    conflictedFiles: [],
+  });
 
   await worktree.cleanupWorkspaceSession();
   worktree.restoreWorkspaceSession(null);
@@ -250,6 +352,36 @@ test("text publish conflicts no longer write conflict markers into main", async 
   expect(preview).not.toContain("conflict region");
   expect(preview).toContain("main change");
   expect(preview).not.toContain("<<<<<<< ");
+
+  await worktree.cleanupWorkspaceSession();
+  worktree.restoreWorkspaceSession(null);
+});
+
+test("agent entrypoint wires auto-resolve into the upmerge UI", async () => {
+  const source = await fs.readFile(path.join(repoRoot, "agent.ts"), "utf8");
+  expect(source).toMatch(/\| "auto-resolve"/);
+  expect(source).toMatch(/currentModel,/);
+  expect(source).toMatch(/key\.name === "a"/);
+  expect(source).toMatch(/runUpmergeSelection\("auto-resolve"\)/);
+  expect(source).toMatch(/Auto-resolving .* with \$\{currentModel\}/);
+  expect(source).toMatch(/appendSystemMessage\(statusMessage\)/);
+  expect(source).toContain('Auto-resolve finished for ${selectedPath}.\\n\\n${result.message}');
+  expect(source).toContain('Auto-resolve failed for ${selectedPath}.\\n\\n${message}');
+});
+
+test("menus wire auto-resolve through the current model", async () => {
+  const source = await fs.readFile(path.join(repoRoot, "lib/agent/menus.ts"), "utf8");
+  expect(source).toMatch(/autoResolveSyncDownConflict/);
+  expect(source).toMatch(/action:\s*[\s\S]*"auto-resolve"/);
+  expect(source).toMatch(/currentModel\?: string/);
+  expect(source).toMatch(/model: options\.currentModel/);
+});
+
+test("sync-down preview documents the auto-resolve shortcut", async () => {
+  const { worktree } = await createSyncDownConflictFixture();
+  const preview = await worktree.getUpmergePreview("notes.txt");
+  expect(preview).toContain("a / auto-resolve");
+  expect(preview).toContain("git base/ours/theirs");
 
   await worktree.cleanupWorkspaceSession();
   worktree.restoreWorkspaceSession(null);

@@ -651,17 +651,34 @@ async function moveUpmergeSelection(delta: number) {
 }
 
 async function runUpmergeSelection(
-  action: "upmerge" | "revert" | "accept-main" | "accept-worktree" | "mark-resolved"
+  action:
+    | "upmerge"
+    | "revert"
+    | "accept-main"
+    | "accept-worktree"
+    | "mark-resolved"
+    | "auto-resolve"
 ) {
   const selectedItem = currentUpmergeItems(upmergeItems)[upmergeSelection] ?? null;
   const shouldCloseAfterSuccess =
     action === "upmerge" && selectedItem?.path === null;
 
   try {
+    if (action === "auto-resolve") {
+      const selectedPath = selectedItem?.path;
+      const statusMessage = selectedPath
+        ? `Auto-resolving ${selectedPath} with ${currentModel}...`
+        : `Auto-resolving worktree conflict with ${currentModel}...`;
+      updateSidebar(statusMessage);
+      appendSystemMessage(statusMessage);
+      renderer.requestRender();
+    }
+
     const result = await runUpmergeSelectionAction({
       upmergeItems,
       upmergeSelection,
       action,
+      currentModel,
     });
 
     if (result.kind === "empty") {
@@ -676,7 +693,16 @@ async function runUpmergeSelection(
       return;
     }
 
-    appendSystemMessage(result.message);
+    if (action === "auto-resolve") {
+      const selectedPath = selectedItem?.path;
+      appendSystemMessage(
+        selectedPath
+          ? `Auto-resolve finished for ${selectedPath}.\n\n${result.message}`
+          : `Auto-resolve finished.\n\n${result.message}`
+      );
+    } else {
+      appendSystemMessage(result.message);
+    }
     await refreshUpmergeState();
 
     if (shouldCloseAfterSuccess) {
@@ -685,7 +711,17 @@ async function runUpmergeSelection(
     return;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    appendEntry("error", message);
+    if (action === "auto-resolve") {
+      const selectedPath = selectedItem?.path;
+      appendEntry(
+        "error",
+        selectedPath
+          ? `Auto-resolve failed for ${selectedPath}.\n\n${message}`
+          : `Auto-resolve failed.\n\n${message}`
+      );
+    } else {
+      appendEntry("error", message);
+    }
   }
 
   await refreshUpmergeState();
@@ -1687,6 +1723,8 @@ function handleGlobalKey(key: KeyEvent) {
       void runUpmergeSelection("revert");
     } else if (key.name === "m") {
       void runUpmergeSelection("mark-resolved");
+    } else if (key.name === "a") {
+      void runUpmergeSelection("auto-resolve");
     } else if (key.sequence === "1") {
       void runUpmergeSelection("accept-main");
     } else if (key.sequence === "2") {

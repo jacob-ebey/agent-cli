@@ -2,6 +2,7 @@ import type { ConversationHistoryItem, ModelMenuItem, UpmergeMenuItem } from "./
 import { buildConversationPreview, formatConversationTimestamp } from "./utils.ts";
 import { buildModelMenuContent, computeModelViewportTop, filterModelItems, moveModelSelection, normalizeModelSelection, selectedModelItem } from "./model-menu.ts";
 import {
+  autoResolveSyncDownConflict,
   getUpmergePreview,
   getUpmergeStatus,
   resolveUpmergeConflict,
@@ -101,7 +102,14 @@ export async function refreshUpmergeState(options: {
 export async function runUpmergeSelection(options: {
   upmergeItems: UpmergeMenuItem[];
   upmergeSelection: number;
-  action: "upmerge" | "revert" | "accept-main" | "accept-worktree" | "mark-resolved";
+  action:
+    | "upmerge"
+    | "revert"
+    | "accept-main"
+    | "accept-worktree"
+    | "mark-resolved"
+    | "auto-resolve";
+  currentModel?: string;
 }) {
   const selected = selectedUpmergeItem(options);
   if (!selected) {
@@ -112,6 +120,10 @@ export async function runUpmergeSelection(options: {
     return { kind: "invalid-revert-all" as const };
   }
 
+  if (options.action === "auto-resolve" && !selected.path) {
+    return { kind: "empty" as const };
+  }
+
   let message: string;
   if (options.action === "upmerge") {
     message =
@@ -120,6 +132,15 @@ export async function runUpmergeSelection(options: {
         : await upmergeRelativePath(selected.path);
   } else if (options.action === "revert") {
     message = await revertRelativePath(selected.path!);
+  } else if (options.action === "auto-resolve") {
+    if (!selected.path || !options.currentModel) {
+      return { kind: "empty" as const };
+    }
+
+    message = await autoResolveSyncDownConflict({
+      relativePath: selected.path,
+      model: options.currentModel,
+    });
   } else {
     if (!selected.path) {
       return { kind: "empty" as const };

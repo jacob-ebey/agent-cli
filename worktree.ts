@@ -3,6 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { generateTextResponse, type Message } from "./lib/llm.ts";
+
 const DEV_NULL_PATH = "/dev/null";
 
 type BaselineRecord = {
@@ -112,6 +114,11 @@ export type WorkspaceSessionManager = {
     sourceRef?: string;
     remote?: string;
     branch?: string;
+  }) => Promise<string>;
+  autoResolveSyncDownConflict: (options: {
+    relativePath: string;
+    model: string;
+    abortSignal?: AbortSignal;
   }) => Promise<string>;
   getUpmergeStatus: () => Promise<UpmergeStatus>;
   getUpmergePreview: (relativePath?: string) => Promise<string>;
@@ -864,9 +871,9 @@ async function hasPendingSyncDownConflicts() {
   return conflicts.length > 0;
 }
 
-async function stageTrackedWorktreeFilesForMerge() {
+async function collectTrackedWorktreePathsForMerge() {
   if (sessionState.mode !== "worktree") {
-    return;
+    return [] as string[];
   }
 
   const pathsToStage = new Set<string>();
@@ -893,6 +900,15 @@ async function stageTrackedWorktreeFilesForMerge() {
     }
   }
 
+  return [...pathsToStage].sort((left, right) => left.localeCompare(right));
+}
+
+async function stageTrackedWorktreeFilesForMerge() {
+  if (sessionState.mode !== "worktree") {
+    return [] as string[];
+  }
+
+  const pathsToStage = await collectTrackedWorktreePathsForMerge();
   for (const relativePath of pathsToStage) {
     const addResult = await runCommand(
       "git",
@@ -903,6 +919,40 @@ async function stageTrackedWorktreeFilesForMerge() {
       throw new Error(addResult.stderr.trim() || `Failed to stage ${relativePath} before merge.`);
     }
   }
+
+  return pathsToStage;
+}
+
+async function commitTrackedWorktreeFilesForMerge(sourceRef: string) {
+  if (sessionState.mode !== "worktree") {
+    return { created: false, stagedPaths: [] as string[], summary: "" };
+  }
+
+  const stagedPaths = await stageTrackedWorktreeFilesForMerge();
+  if (!stagedPaths.length) {
+    return { created: false, stagedPaths, summary: "" };
+  }
+
+  const commitMessage = `agent-cli: checkpoint before merging ${sourceRef}`;
+  const commitResult = await runCommand(
+    "git",
+    ["commit", "--no-verify", "-m", commitMessage],
+    sessionState.worktreeRoot
+  );
+
+  if (commitResult.exitCode !== 0) {
+    throw new Error(
+      commitResult.stderr.trim() ||
+        commitResult.stdout.trim() ||
+        `Failed to create a temporary checkpoint commit before merging ${sourceRef}.`
+    );
+  }
+
+  return {
+    created: true,
+    stagedPaths,
+    summary: [commitResult.stdout.trim(), commitResult.stderr.trim()].filter(Boolean).join("\n"),
+  };
 }
 
 async function mergeSourceIntoWorktree(options?: {
@@ -951,7 +1001,7 @@ async function mergeSourceIntoWorktree(options?: {
     resolvedSource = currentBranch === "HEAD" ? "HEAD" : `origin/${currentBranch}`;
   }
 
-  await stageTrackedWorktreeFilesForMerge();
+  const checkpoint = await commitTrackedWorktreeFilesForMerge(resolvedSource);
 
   const mergeResult = await runCommand(
     "git",
@@ -962,6 +1012,13 @@ async function mergeSourceIntoWorktree(options?: {
   const summaryLines = [
     `Merged source ref \`${resolvedSource}\` into the agent worktree.`,
   ];
+  if (checkpoint.created) {
+    summaryLines.push(
+      "",
+      `Created a temporary checkpoint commit for tracked worktree edits before merging \`${resolvedSource}\`.`,
+      `Checkpointed paths: ${checkpoint.stagedPaths.join(", ") || "(none)"}`
+    );
+  }
 
   const stdout = mergeResult.stdout.trim();
   const stderr = mergeResult.stderr.trim();
@@ -1081,6 +1138,7 @@ async function getUpmergePreview(relativePath?: string): Promise<string> {
             "- 2 / accept-worktree: keep the current worktree version when possible",
             "- m / mark-resolved: after manually resolving and staging in the worktree",
             "- r / revert: discard the agent/worktree side",
+            "- a / auto-resolve: unavailable for binary conflicts",
           ].join("\n");
         }
 
@@ -1096,7 +1154,12 @@ async function getUpmergePreview(relativePath?: string): Promise<string> {
           "",
           "This file has merge markers in the agent worktree.",
           "Resolve it in the worktree, then use mark-resolved.",
-          "Quick actions: 1 take main/source, 2 keep worktree, r revert agent changes.",
+          "Quick actions:",
+          "- 1 / accept-main: take the main/source version into the worktree",
+          "- 2 / accept-worktree: keep the current worktree version",
+          "- a / auto-resolve: ask the current model to write a resolved file from git base/ours/theirs",
+          "- m / mark-resolved: after manually resolving and staging in the worktree",
+          "- r / revert: discard the agent/worktree side",
           "",
           buildConflictPreview(text),
         ].join("\n");
@@ -1323,6 +1386,189 @@ async function upmergeAll() {
   return results.join("\n");
 }
 
+async function getUnmergedStatusForPath(relativePath: string) {
+  if (sessionState.mode !== "worktree") {
+    return null;
+  }
+
+  const result = await runCommand(
+    "git",
+    ["status", "--short", "--", relativePath],
+    sessionState.worktreeRoot
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr.trim() || `Failed to inspect merge status for ${relativePath}.`);
+  }
+
+  const line = result.stdout
+    .split("\n")
+    .map((entry) => entry.trimEnd())
+    .find(Boolean);
+  if (!line) {
+    return null;
+  }
+
+  return line.slice(0, 2);
+}
+
+async function checkoutConflictStage(relativePath: string, stage: "ours" | "theirs") {
+  if (sessionState.mode !== "worktree") {
+    return;
+  }
+
+  const result = await runCommand(
+    "git",
+    ["checkout", `--${stage}`, "--", relativePath],
+    sessionState.worktreeRoot
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(
+      result.stderr.trim() || `Failed to checkout ${stage} version for ${relativePath}.`
+    );
+  }
+
+  const addResult = await runCommand(
+    "git",
+    ["add", "--", relativePath],
+    sessionState.worktreeRoot
+  );
+  if (addResult.exitCode !== 0) {
+    throw new Error(addResult.stderr.trim() || `Failed to stage resolved path ${relativePath}.`);
+  }
+}
+
+async function stageResolvedWorktreePath(relativePath: string) {
+  if (sessionState.mode !== "worktree") {
+    return;
+  }
+
+  const addResult = await runCommand(
+    "git",
+    ["add", "--", relativePath],
+    sessionState.worktreeRoot
+  );
+  if (addResult.exitCode !== 0) {
+    throw new Error(addResult.stderr.trim() || `Failed to stage resolved path ${relativePath}.`);
+  }
+}
+
+async function readConflictStageBlob(relativePath: string, stageNumber: 1 | 2 | 3) {
+  if (sessionState.mode !== "worktree") {
+    return null;
+  }
+
+  const result = await runCommand(
+    "git",
+    ["show", `:${stageNumber}:${relativePath}`],
+    sessionState.worktreeRoot
+  );
+  if (result.exitCode !== 0) {
+    return null;
+  }
+
+  return result.stdout;
+}
+
+function buildSyncDownAutoResolutionPrompt(options: {
+  relativePath: string;
+  conflictedText: string;
+  baseText: string;
+  ourText: string;
+  theirText: string;
+}) {
+  return [
+    `You are resolving a git merge conflict for ${options.relativePath}.`,
+    "Return only the final resolved file contents with no markdown fences, commentary, or explanation.",
+    "Preserve intent from both sides when possible and produce a clean merged result.",
+    "",
+    "Base version:",
+    "<<<BASE>>>",
+    options.baseText,
+    "<<<END BASE>>>",
+    "",
+    "Our/worktree version:",
+    "<<<OURS>>>",
+    options.ourText,
+    "<<<END OURS>>>",
+    "",
+    "Their/main version:",
+    "<<<THEIRS>>>",
+    options.theirText,
+    "<<<END THEIRS>>>",
+    "",
+    "Current conflicted file:",
+    "<<<CONFLICTED>>>",
+    options.conflictedText,
+    "<<<END CONFLICTED>>>",
+  ].join("\n");
+}
+
+async function autoResolveSyncDownConflict(options: {
+  relativePath: string;
+  model: string;
+  abortSignal?: AbortSignal;
+}) {
+  const status = await getUpmergeStatus();
+  if (status.mode !== "worktree") {
+    return status.note;
+  }
+  if (sessionState.mode !== "worktree") {
+    return status.note;
+  }
+
+  const conflict = getConflictRecord(options.relativePath);
+  if (!conflict || conflict.phase !== "sync-down") {
+    return `No pending sync-down conflict for ${options.relativePath}.`;
+  }
+  if (conflict.type !== "text") {
+    return `Automatic resolution is only supported for text sync-down conflicts. ${options.relativePath} is ${conflict.type}.`;
+  }
+
+  const worktreePath = path.join(sessionState.worktreeWorkspaceRoot, options.relativePath);
+  const conflicted = await readWorkspaceVersion(worktreePath);
+  if (!conflicted.content) {
+    return `Cannot auto-resolve ${options.relativePath}: conflicted worktree file is unavailable.`;
+  }
+
+  const [baseText, ourText, theirText] = await Promise.all([
+    readConflictStageBlob(options.relativePath, 1),
+    readConflictStageBlob(options.relativePath, 2),
+    readConflictStageBlob(options.relativePath, 3),
+  ]);
+
+  if (baseText === null || ourText === null || theirText === null) {
+    return `Cannot auto-resolve ${options.relativePath}: missing git conflict stages for the file.`;
+  }
+
+  const prompt = buildSyncDownAutoResolutionPrompt({
+    relativePath: options.relativePath,
+    conflictedText: conflicted.content.toString("utf8"),
+    baseText,
+    ourText,
+    theirText,
+  });
+
+  const resolvedText = await generateTextResponse({
+    model: options.model,
+    messages: [{ role: "user", content: prompt } satisfies Message],
+    abortSignal: options.abortSignal,
+  });
+
+  await fs.writeFile(worktreePath, resolvedText, "utf8");
+  if (hasConflictMarkers(Buffer.from(resolvedText, "utf8"))) {
+    return `Automatic resolution for ${options.relativePath} still contains conflict markers. Review and resolve manually.`;
+  }
+
+  await stageResolvedWorktreePath(options.relativePath);
+  const unmergedStatus = await getUnmergedStatusForPath(options.relativePath);
+  if (unmergedStatus && /^(UU|AA|DD|AU|UA|DU|UD)$/.test(unmergedStatus)) {
+    return `Automatic resolution for ${options.relativePath} did not finish cleanly: git still reports the path as unmerged.`;
+  }
+
+  clearConflictRecord(options.relativePath);
+  return `Automatically resolved worktree merge conflict for ${options.relativePath} with model ${options.model}.`;
+}
+
 async function resolveUpmergeConflict(
   relativePath: string,
   strategy: UpmergeResolutionStrategy
@@ -1349,21 +1595,25 @@ async function resolveUpmergeConflict(
 
   if (conflict.phase === "sync-down") {
     if (strategy === "accept-main") {
-      await writeWorkspaceVersion(worktreePath, current.content);
+      await checkoutConflictStage(relativePath, "theirs");
       clearConflictRecord(relativePath);
-      return `Resolved worktree merge conflict for ${relativePath} by taking the main workspace version into the worktree.`;
+      return `Resolved worktree merge conflict for ${relativePath} by taking the main/source version into the worktree.`;
     }
 
     if (strategy === "accept-worktree") {
-      if (conflict.type === "text" && hasConflictMarkers(edited.content)) {
-        return `Cannot keep the worktree version for ${relativePath} yet: the worktree file still contains conflict markers.`;
-      }
+      await checkoutConflictStage(relativePath, "ours");
       clearConflictRecord(relativePath);
       return `Resolved worktree merge conflict for ${relativePath} by keeping the current worktree version.`;
     }
 
     if (conflict.type === "text" && hasConflictMarkers(edited.content)) {
       return `Cannot mark ${relativePath} resolved yet: the worktree file still contains conflict markers.`;
+    }
+
+    await stageResolvedWorktreePath(relativePath);
+    const unmergedStatus = await getUnmergedStatusForPath(relativePath);
+    if (unmergedStatus && /^(UU|AA|DD|AU|UA|DU|UD)$/.test(unmergedStatus)) {
+      return `Cannot mark ${relativePath} resolved yet: git still reports it as unmerged.`;
     }
 
     clearConflictRecord(relativePath);
@@ -1424,6 +1674,7 @@ async function cleanupWorkspaceSession(
     prepareWorkspaceForEdit,
     trackEditTarget,
     mergeSourceIntoWorktree,
+    autoResolveSyncDownConflict,
     getUpmergeStatus,
     getUpmergePreview,
     upmergeRelativePath,
@@ -1448,6 +1699,7 @@ export const {
   prepareWorkspaceForEdit,
   trackEditTarget,
   mergeSourceIntoWorktree,
+  autoResolveSyncDownConflict,
   getUpmergeStatus,
   getUpmergePreview,
   upmergeRelativePath,
