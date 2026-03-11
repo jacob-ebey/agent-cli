@@ -36,6 +36,22 @@ type SessionState =
       baselinesRoot: string;
     };
 
+export type PersistedWorkspaceSession = {
+  version: 1;
+  mode: "worktree";
+  note: string;
+  trackedFiles: Array<{
+    relativePath: string;
+    baselinePath: string | null;
+    exists: boolean;
+  }>;
+  gitRoot: string;
+  sessionRoot: string;
+  worktreeRoot: string;
+  worktreeWorkspaceRoot: string;
+  baselinesRoot: string;
+};
+
 export type UpmergeStatus = {
   mode: "direct" | "worktree";
   note: string;
@@ -51,6 +67,7 @@ let sessionState: SessionState = {
 
 let detectedGitRoot: string | null | undefined;
 let ensureSessionPromise: Promise<SessionState> | null = null;
+let sessionStorageRoot: string | null = null;
 
 function toPortablePath(relativePath: string) {
   return relativePath.split(path.sep).join("/");
@@ -203,7 +220,9 @@ async function syncWorkspaceChangesIntoWorktree(worktreeWorkspaceRoot: string) {
 }
 
 async function createWorktreeSession(gitRoot: string) {
-  const sessionRoot = await fs.mkdtemp(path.join(os.tmpdir(), "agent-cli-worktree-"));
+  const sessionRoot = sessionStorageRoot
+    ? sessionStorageRoot
+    : await fs.mkdtemp(path.join(os.tmpdir(), "agent-cli-worktree-"));
   const worktreeRoot = path.join(sessionRoot, "tree");
   const baselinesRoot = path.join(sessionRoot, "baselines");
   const workspaceRelativePath = path.relative(gitRoot, ORIGINAL_WORKSPACE_ROOT);
@@ -211,6 +230,11 @@ async function createWorktreeSession(gitRoot: string) {
     workspaceRelativePath.length > 0
       ? path.join(worktreeRoot, workspaceRelativePath)
       : worktreeRoot;
+
+  if (sessionStorageRoot) {
+    await fs.rm(sessionRoot, { recursive: true, force: true });
+    await fs.mkdir(sessionRoot, { recursive: true });
+  }
 
   const addResult = await runCommand(
     "git",
@@ -449,6 +473,68 @@ export function getOriginalWorkspaceRoot() {
   return ORIGINAL_WORKSPACE_ROOT;
 }
 
+export function setWorkspaceSessionStorageRoot(storageRoot: string | null) {
+  sessionStorageRoot = storageRoot;
+}
+
+export function captureWorkspaceSession(): PersistedWorkspaceSession | null {
+  if (sessionState.mode !== "worktree") {
+    return null;
+  }
+
+  return {
+    version: 1,
+    mode: "worktree",
+    note: sessionState.note,
+    trackedFiles: [...sessionState.trackedFiles.entries()].map(
+      ([relativePath, record]) => ({
+        relativePath,
+        baselinePath: record.baselinePath,
+        exists: record.exists,
+      })
+    ),
+    gitRoot: sessionState.gitRoot,
+    sessionRoot: sessionState.sessionRoot,
+    worktreeRoot: sessionState.worktreeRoot,
+    worktreeWorkspaceRoot: sessionState.worktreeWorkspaceRoot,
+    baselinesRoot: sessionState.baselinesRoot,
+  };
+}
+
+export function restoreWorkspaceSession(session: PersistedWorkspaceSession | null) {
+  ensureSessionPromise = null;
+
+  if (!session) {
+    sessionState = {
+      initialized: false,
+      mode: "direct",
+      note: "A git worktree will be created on the first edit when available.",
+      trackedFiles: new Map(),
+    };
+    return;
+  }
+
+  sessionState = {
+    initialized: true,
+    mode: "worktree",
+    note: session.note,
+    trackedFiles: new Map(
+      session.trackedFiles.map((entry) => [
+        entry.relativePath,
+        {
+          baselinePath: entry.baselinePath,
+          exists: entry.exists,
+        },
+      ])
+    ),
+    gitRoot: session.gitRoot,
+    sessionRoot: session.sessionRoot,
+    worktreeRoot: session.worktreeRoot,
+    worktreeWorkspaceRoot: session.worktreeWorkspaceRoot,
+    baselinesRoot: session.baselinesRoot,
+  };
+}
+
 export function getActiveWorkspaceRoot() {
   return sessionState.mode === "worktree"
     ? sessionState.worktreeWorkspaceRoot
@@ -663,12 +749,24 @@ export async function upmergeAll() {
   return results.join("\n");
 }
 
-export async function cleanupWorkspaceSession() {
-  if (sessionState.mode !== "worktree") {
+export async function cleanupWorkspaceSession(
+  targetSession: PersistedWorkspaceSession | null = captureWorkspaceSession()
+) {
+  if (!targetSession) {
     return;
   }
 
-  const { gitRoot, worktreeRoot, sessionRoot } = sessionState;
+  const { gitRoot, worktreeRoot, sessionRoot } = targetSession;
   await runCommand("git", ["worktree", "remove", "--force", worktreeRoot], gitRoot);
   await fs.rm(sessionRoot, { recursive: true, force: true });
+
+  if (sessionState.mode === "worktree" && sessionState.sessionRoot === sessionRoot) {
+    sessionState = {
+      initialized: false,
+      mode: "direct",
+      note: "A git worktree will be created on the first edit when available.",
+      trackedFiles: new Map(),
+    };
+    ensureSessionPromise = null;
+  }
 }
