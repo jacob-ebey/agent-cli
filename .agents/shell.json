@@ -3,6 +3,7 @@
   "approvedCommands": [
     "bun test",
     "bun test test/agent-cli.integration.test.ts",
+    "bun test test/event-stream-decoder.test.ts",
     "bun typecheck"
   ],
   "startupCommands": [

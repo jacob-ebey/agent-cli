@@ -183,6 +183,7 @@ export type SidebarPresentationState = {
   mode: Mode;
   currentModel: string;
   entriesCount: number;
+  upmergeCount: number;
   autoScrollState: AutoScrollState;
   activeShellProcess: boolean;
   insertDraft: string;

@@ -145,7 +145,7 @@ function createSessionSidebarViewModel(
       `Mode: ${state.mode}`,
       `Model: ${state.currentModel}`,
       `Messages: ${state.entriesCount}`,
-      `Upmerges: ${state.upmergeItems.length}`,
+      `Upmerges: ${state.upmergeCount}`,
       "",
       state.upmergeNote,
       "",

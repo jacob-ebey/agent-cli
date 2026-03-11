@@ -852,6 +852,7 @@ async function loadSelectedHistoryConversation() {
 
   await archiveCurrentConversation();
   replaceConversationState(selected);
+  await refreshHistoryState();
   insertDraft = "";
   commandDraft = "";
   shellDraft = "";
@@ -993,6 +994,7 @@ function buildSidebarPresentationState(): SidebarPresentationState {
     mode,
     currentModel,
     entriesCount: entries.length,
+    upmergeCount: upmergeItems.filter((item) => item.kind === "pending").length,
     autoScrollState,
     activeShellProcess: activeShellProcess !== null,
     insertDraft,
