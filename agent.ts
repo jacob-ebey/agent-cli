@@ -245,8 +245,6 @@ let nextIdCounter = 0;
 let busy = false;
 let streamPhase: StreamPhase = "idle";
 let latestTotalTokensUsed: number | null = null;
-
-const DEFAULT_TOKEN_WINDOW = 272_000;
 let mode: Mode = "normal";
 let insertDraft = "";
 let commandDraft = "";
@@ -998,15 +996,7 @@ async function settlePendingApproval(decision: ApprovalDecision) {
 
 function formatTokenWindowLabel() {
   const used = Math.max(0, Math.round(latestTotalTokensUsed ?? 0));
-  if (DEFAULT_TOKEN_WINDOW <= 0) {
-    return "0% used";
-  }
-
-  const percentUsed = Math.min(
-    100,
-    Math.max(0, Math.round((used / DEFAULT_TOKEN_WINDOW) * 100))
-  );
-  return `${percentUsed}% used`;
+  return `${used}`;
 }
 
 function buildSidebarPresentationState(): SidebarPresentationState {
