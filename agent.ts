@@ -1058,6 +1058,36 @@ function extractAssistantText(messages: Message[]) {
     .join("");
 }
 
+function assistantMessageContainsToolCall(message: Message) {
+  if (message.role !== "assistant") {
+    return false;
+  }
+
+  const content = (message as { content?: unknown }).content;
+  if (!Array.isArray(content)) {
+    return false;
+  }
+
+  return content.some((part) => {
+    if (typeof part !== "object" || part === null) {
+      return false;
+    }
+
+    return (part as { type?: unknown }).type === "tool-call";
+  });
+}
+
+function lastAssistantResponseContainsToolCall(messages: Message[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === "assistant") {
+      return assistantMessageContainsToolCall(message);
+    }
+  }
+
+  return false;
+}
+
 async function getApprovalTarget(
   toolName: string,
   tool: LoadedTool,
@@ -2940,113 +2970,121 @@ async function submitPrompt() {
   let streamAborted = false;
 
   try {
-    let sawAssistantOutput = false;
-    let sawToolActivity = false;
-    const streamAbortController = new AbortController();
-    activeStreamAbortController = streamAbortController;
+    let shouldContinueAgentLoop = true;
 
-    let assistantEntry: ChatEntry | null = null;
-    let assistantContent = "";
-    let assistantTranscriptIndex: number | null = null;
+    while (shouldContinueAgentLoop && !streamAborted) {
+      let sawAssistantOutput = false;
+      let sawToolActivity = false;
+      const streamAbortController = new AbortController();
+      activeStreamAbortController = streamAbortController;
 
-    try {
-      const result = streamResponse({
-        model: currentModel,
-        messages: conversation,
-        tools,
-        abortSignal: streamAbortController.signal,
-      });
+      let assistantEntry: ChatEntry | null = null;
+      let assistantContent = "";
+      let assistantTranscriptIndex: number | null = null;
 
-      for await (const chunk of result.stream) {
-        switch (chunk.type) {
-          case "reasoning":
-            updateSidebar("Model is reasoning...");
-            break;
-          case "content":
-            if (!assistantEntry) {
-              assistantEntry = appendEntry("assistant", "", {
-                recordInTranscript: false,
-              });
-              assistantTranscriptIndex =
-                transcriptHistory.push({
+      try {
+        const result = streamResponse({
+          model: currentModel,
+          messages: conversation,
+          tools,
+          abortSignal: streamAbortController.signal,
+        });
+
+        for await (const chunk of result.stream) {
+          switch (chunk.type) {
+            case "reasoning":
+              updateSidebar("Model is reasoning...");
+              break;
+            case "content":
+              if (!assistantEntry) {
+                assistantEntry = appendEntry("assistant", "", {
+                  recordInTranscript: false,
+                });
+                assistantTranscriptIndex =
+                  transcriptHistory.push({
+                    role: "assistant",
+                    content: "",
+                  }) - 1;
+              }
+              assistantContent += chunk.content;
+              assistantEntry.body.content = assistantContent || " ";
+              if (assistantTranscriptIndex !== null) {
+                transcriptHistory[assistantTranscriptIndex] = {
                   role: "assistant",
-                  content: "",
-                }) - 1;
-            }
-            assistantContent += chunk.content;
-            assistantEntry.body.content = assistantContent || " ";
-            if (assistantTranscriptIndex !== null) {
-              transcriptHistory[assistantTranscriptIndex] = {
-                role: "assistant",
-                content: assistantContent,
-              };
-            }
+                  content: assistantContent,
+                };
+              }
+              sawAssistantOutput = true;
+              renderer.requestRender();
+              scrollToBottom();
+              break;
+            case "tool-call-start":
+              sawToolActivity = true;
+              updateSidebar(`Tool requested: ${chunk.toolName}`);
+              break;
+            case "tool-call-delta":
+              sawToolActivity = true;
+              updateSidebar(`Preparing tool input: ${chunk.toolName}`);
+              break;
+            case "tool-result":
+              sawToolActivity = true;
+              appendSystemMessage(
+                summarizeToolResult(chunk.toolName, chunk.input, chunk.output) ??
+                  [
+                    `Tool \`${chunk.toolName}\` completed.`,
+                    "",
+                    formatToolOutput(chunk.output),
+                  ].join("\n")
+              );
+              await refreshUpmergeState();
+              updateSidebar(`Tool completed: ${chunk.toolName}`);
+              break;
+          }
+        }
+
+        const responseMessages = await result.responseMessages;
+        conversation.push(...responseMessages);
+
+        if (!assistantContent.trim() && !sawAssistantOutput) {
+          const finalAssistantText = extractAssistantText(responseMessages);
+          if (finalAssistantText.trim()) {
+            appendEntry("assistant", finalAssistantText);
             sawAssistantOutput = true;
-            renderer.requestRender();
-            scrollToBottom();
-            break;
-          case "tool-call-start":
-            sawToolActivity = true;
-            updateSidebar(`Tool requested: ${chunk.toolName}`);
-            break;
-          case "tool-call-delta":
-            sawToolActivity = true;
-            updateSidebar(`Preparing tool input: ${chunk.toolName}`);
-            break;
-          case "tool-result":
-            sawToolActivity = true;
-            appendSystemMessage(
-              summarizeToolResult(chunk.toolName, chunk.input, chunk.output) ??
-                [
-                  `Tool \`${chunk.toolName}\` completed.`,
-                  "",
-                  formatToolOutput(chunk.output),
-                ].join("\n")
-            );
-            await refreshUpmergeState();
-            updateSidebar(`Tool completed: ${chunk.toolName}`);
-            break;
+            assistantContent = finalAssistantText;
+          }
+        }
+        await persistActiveConversation();
+
+        if (
+          !assistantContent.trim() &&
+          !sawAssistantOutput &&
+          !sawToolActivity &&
+          !lastAssistantResponseContainsToolCall(responseMessages)
+        ) {
+          appendEntry(
+            "assistant",
+            "The model returned an empty response. Try another prompt."
+          );
+          shouldContinueAgentLoop = false;
+        } else {
+          shouldContinueAgentLoop =
+            lastAssistantResponseContainsToolCall(responseMessages);
+        }
+      } catch (error) {
+        if (
+          streamAbortController.signal.aborted ||
+          (error instanceof DOMException && error.name === "AbortError")
+        ) {
+          streamAborted = true;
+          updateSidebar("Streaming aborted.");
+        } else {
+          throw error;
+        }
+      } finally {
+        if (activeStreamAbortController === streamAbortController) {
+          activeStreamAbortController = null;
         }
       }
-
-      const responseMessages = await result.responseMessages;
-      conversation.push(...responseMessages);
-
-      if (!assistantContent.trim() && !sawAssistantOutput) {
-        const finalAssistantText = extractAssistantText(responseMessages);
-        if (finalAssistantText.trim()) {
-          appendEntry("assistant", finalAssistantText);
-          sawAssistantOutput = true;
-          assistantContent = finalAssistantText;
-        }
-      }
-      await persistActiveConversation();
-    } catch (error) {
-      if (
-        streamAbortController.signal.aborted ||
-        (error instanceof DOMException && error.name === "AbortError")
-      ) {
-        streamAborted = true;
-        updateSidebar("Streaming aborted.");
-      } else {
-        throw error;
-      }
-    } finally {
-      if (activeStreamAbortController === streamAbortController) {
-        activeStreamAbortController = null;
-      }
-    }
-
-    if (
-      !streamAborted &&
-      !assistantContent.trim() &&
-      !sawAssistantOutput &&
-      !sawToolActivity
-    ) {
-      appendEntry(
-        "assistant",
-        "The model returned an empty response. Try another prompt."
-      );
     }
 
     if (!streamAborted) {
