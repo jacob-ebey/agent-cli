@@ -4,8 +4,6 @@ import * as path from "node:path";
 import {
   CONFIG_DIRECTORY,
   CONFIG_PATH,
-  GITIGNORE_PATH,
-  PLAN_GITIGNORE_ENTRY,
   PLAN_PATH,
   ROOT_AGENTS_PATH,
   SHELL_APPROVALS_PATH,
@@ -129,33 +127,6 @@ export async function ensurePlanFileReady() {
 
     await fs.writeFile(PLAN_PATH, "", "utf-8");
   }
-
-  let gitignoreSource = "";
-
-  try {
-    gitignoreSource = await fs.readFile(GITIGNORE_PATH, "utf-8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw error;
-    }
-  }
-
-  const existingEntries = new Set(
-    gitignoreSource
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-  );
-
-  if (existingEntries.has(PLAN_GITIGNORE_ENTRY)) {
-    return;
-  }
-
-  const nextSource = gitignoreSource.trimEnd()
-    ? `${gitignoreSource.trimEnd()}\n${PLAN_GITIGNORE_ENTRY}\n`
-    : `${PLAN_GITIGNORE_ENTRY}\n`;
-
-  await fs.writeFile(GITIGNORE_PATH, nextSource, "utf-8");
 }
 
 export async function loadRootAgentsGuidance() {

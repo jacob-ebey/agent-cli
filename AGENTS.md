@@ -54,7 +54,6 @@
   - `worktree.ts` rejects paths that resolve outside the root.
 - `agent.ts` always calls `ensurePlanFileReady()` during startup.
   - This creates `.agents/PLAN.md` if missing.
-  - This also ensures `.agents/PLAN.md` is present in `.gitignore`.
 - `.agents/PLAN.md` is intentionally excluded from upmerge.
   - `worktree.ts` hard-codes it in `UPMERGE_IGNORED_PATHS`.
 - The `:agents-md` flow is read-only until final writeback.
@@ -136,7 +135,7 @@
 
 - Do not invent new repo-level commands unless they are added to `package.json` or clearly supported by code/docs.
 - Preserve machine-managed files and conventions:
-  - `.agents/PLAN.md` is scratch space and should remain gitignored.
+  - `.agents/PLAN.md` is scratch space and is excluded from upmerge.
   - `.agents/shell.json` is managed as persisted shell approval/startup state.
   - `.agents/skills-index.json` is generated from local skills.
 - Prefer small, subsystem-local edits over broad refactors unless the change clearly spans multiple modules.
