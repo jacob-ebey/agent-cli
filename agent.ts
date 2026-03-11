@@ -97,6 +97,11 @@ import {
   loadTools,
   summarizeToolResult,
 } from "./lib/agent/tools.ts";
+import {
+  appendTranscriptEntry,
+  clearTranscriptEntries,
+  restoreTranscriptEntries,
+} from "./lib/agent/transcript-view.ts";
 import { indexSkills } from "./lib/skills-index.ts";
 import {
   captureWorkspaceSession,
@@ -501,40 +506,6 @@ function resolveModelCommand(input: string) {
   }
 
   return value || null;
-}
-
-function roleTheme(role: ChatRole) {
-  switch (role) {
-    case "user":
-      return {
-        title: "You",
-        border: "#3b82f6",
-        background: "#0f172a",
-        foreground: "#dbeafe",
-      };
-    case "system":
-      return {
-        title: "System",
-        border: "#8b5cf6",
-        background: "#1e1b4b",
-        foreground: "#ede9fe",
-      };
-    case "error":
-      return {
-        title: "Error",
-        border: "#ef4444",
-        background: "#2b1120",
-        foreground: "#fecaca",
-      };
-    case "assistant":
-    default:
-      return {
-        title: "Agent",
-        border: "#10b981",
-        background: "#052e2b",
-        foreground: "#d1fae5",
-      };
-  }
 }
 
 const app = new BoxRenderable(renderer, {
@@ -1690,41 +1661,20 @@ function appendEntry(
     recordInTranscript?: boolean;
   } = {}
 ) {
-  const theme = roleTheme(role);
-  const container = new BoxRenderable(renderer, {
-    id: nextId("message"),
-    width: "100%",
-    border: true,
-    borderStyle: "rounded",
-    borderColor: theme.border,
-    backgroundColor: theme.background,
-    title: theme.title,
-    padding: 1,
-  });
-
-  const body = new TextRenderable(renderer, {
-    id: nextId("message-body"),
-    content: content || " ",
-    fg: theme.foreground,
-  });
-
-  container.add(body);
-  transcript.add(container);
-
-  const entry: ChatEntry = {
-    id: container.id,
+  return appendTranscriptEntry({
+    renderer,
+    transcript,
+    entries,
+    transcriptHistory,
+    nextId,
     role,
-    container,
-    body,
-  };
-
-  entries.push(entry);
-  if (options.recordInTranscript !== false) {
-    transcriptHistory.push({ role, content });
-  }
-  updateSidebar();
-  scrollToBottom();
-  return entry;
+    content,
+    recordInTranscript: options.recordInTranscript,
+    onEntryAdded: () => {
+      updateSidebar();
+      scrollToBottom();
+    },
+  });
 }
 
 function pushConversationMessage(
@@ -1759,20 +1709,26 @@ function appendSystemMessage(
 }
 
 function clearEntries() {
-  for (const entry of [...entries]) {
-    transcript.remove(entry.id);
-  }
-  entries.length = 0;
+  clearTranscriptEntries({
+    transcript,
+    entries,
+  });
 }
 
 function restoreTranscriptFromHistory() {
-  clearEntries();
-  for (const entry of transcriptHistory) {
-    appendEntry(entry.role, entry.content, { recordInTranscript: false });
-  }
-  updateSidebar();
-  renderer.requestRender();
-  scrollToBottom(true);
+  restoreTranscriptEntries({
+    rendererRequestRender: () => renderer.requestRender(),
+    transcript,
+    entries,
+    transcriptHistory,
+    appendEntry: (role, content, recordInTranscript) => {
+      appendEntry(role, content, { recordInTranscript });
+    },
+    onRestored: () => {
+      updateSidebar();
+      scrollToBottom(true);
+    },
+  });
 }
 
 function replaceConversationState(state: PersistedConversationState) {
