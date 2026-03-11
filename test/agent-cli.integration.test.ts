@@ -86,10 +86,35 @@ test("agent entrypoint imports its local modules and keeps the quit command wire
   expect(source).toMatch(/renderer\.destroy\(\)/);
 });
 
-test("worktree upmerge writes text conflict markers and supports resolving by keeping main", async () => {
+test("merge source into worktree produces a realistic sync-down conflict with staged worktree edits", async () => {
   const repoPath = await createTempGitRepo({
     "notes.txt": ["start", "shared", "end", ""].join("\n"),
   });
+  await runGit(["branch", "-M", "main"], repoPath);
+
+  const upstreamPath = `${repoPath}-upstream.git`;
+  await runGit(["init", "--bare", upstreamPath], repoPath);
+  await runGit(["remote", "add", "origin", upstreamPath], repoPath);
+  await runGit(["push", "-u", "origin", "main"], repoPath);
+
+  const upstreamCheckout = await fs.mkdtemp(
+    path.join(await fs.realpath(os.tmpdir()), "agent-cli-upstream-checkout-")
+  );
+  tempDirs.push(upstreamCheckout);
+  await runGit(["clone", upstreamPath, upstreamCheckout], repoPath);
+  await runGit(["checkout", "main"], upstreamCheckout);
+  await runGit(["config", "user.name", "agent-cli tests"], upstreamCheckout);
+  await runGit(["config", "user.email", "agent-cli@example.com"], upstreamCheckout);
+  await fs.writeFile(
+    path.join(upstreamCheckout, "notes.txt"),
+    ["start", "main change", "end", ""].join("\n"),
+    "utf8"
+  );
+  await runGit(["add", "notes.txt"], upstreamCheckout);
+  await runGit(["commit", "-m", "main change"], upstreamCheckout);
+  await runGit(["push", "origin", "main"], upstreamCheckout);
+  await runGit(["fetch", "origin", "main"], repoPath);
+
   const worktreeModule = await loadWorktreeModuleForRepo();
   const worktree = worktreeModule.createWorkspaceSessionManager(path.resolve(repoPath));
 
@@ -98,55 +123,42 @@ test("worktree upmerge writes text conflict markers and supports resolving by ke
   await worktree.prepareWorkspaceForEdit();
 
   const mainPath = worktree.resolveOriginalWorkspacePath("notes.txt");
-  expect(mainPath).toBe(path.join(repoPath, "notes.txt"));
-  expect(await fs.readFile(mainPath, "utf8")).toBe(["start", "shared", "end", ""].join("\n"));
   await worktree.trackEditTarget("notes.txt");
   const worktreePath = path.join(worktree.getActiveWorkspaceRoot(), "notes.txt");
-
   await fs.writeFile(worktreePath, ["start", "worktree change", "end", ""].join("\n"), "utf8");
-  await fs.writeFile(mainPath, ["start", "main change", "end", ""].join("\n"), "utf8");
 
-  const result = await worktree.upmergeRelativePath("notes.txt");
-  expect(result).toContain("wrote conflict markers");
+  const result = await worktree.mergeSourceIntoWorktree({ sourceRef: "origin/main" });
+  expect(result).toContain("Merge conflict while merging `origin/main` into the agent worktree.");
+  expect(result).toContain("Resolve conflicts in the worktree before publishing changes back to the main workspace.");
 
-  const conflictedMain = await fs.readFile(mainPath, "utf8");
-  expect(conflictedMain).toContain("<<<<<<< current/notes.txt");
-  expect(conflictedMain).toContain("main change");
-  expect(conflictedMain).toContain("worktree change");
+  expect(await fs.readFile(mainPath, "utf8")).toBe(["start", "shared", "end", ""].join("\n"));
+
+  const conflictedWorktree = await fs.readFile(worktreePath, "utf8");
+  expect(conflictedWorktree).toContain("<<<<<<< ");
+  expect(conflictedWorktree).toContain("main change");
+  expect(conflictedWorktree).toContain("worktree change");
 
   expect(await worktree.getUpmergeStatus()).toEqual({
     mode: "worktree",
     note: "Agent edits are isolated in a git worktree until you upmerge them.",
     pendingFiles: [],
-    conflictedFiles: [{ path: "notes.txt", type: "text", status: "pending" }],
+    conflictedFiles: [
+      { path: "notes.txt", type: "text", status: "pending", phase: "sync-down" },
+    ],
   });
 
   const preview = await worktree.getUpmergePreview("notes.txt");
-  expect(preview).toContain("Text upmerge conflict: notes.txt");
+  expect(preview).toContain("Text worktree merge conflict: notes.txt");
   expect(preview).toContain("conflict region");
 
-  const unresolvedMessage = await worktree.resolveUpmergeConflict("notes.txt", "mark-resolved");
-  expect(unresolvedMessage).toContain("still contains conflict markers");
-
-  await fs.writeFile(mainPath, ["start", "main resolved", "end", ""].join("\n"), "utf8");
-  const resolvedMessage = await worktree.resolveUpmergeConflict("notes.txt", "mark-resolved");
-  expect(resolvedMessage).toBe("Marked upmerge conflict for notes.txt as resolved.");
-
-  expect(await fs.readFile(mainPath, "utf8")).toBe(["start", "main resolved", "end", ""].join("\n"));
-  expect(await fs.readFile(worktreePath, "utf8")).toBe(["start", "main resolved", "end", ""].join("\n"));
-
-  expect(await worktree.getUpmergeStatus()).toEqual({
-    mode: "worktree",
-    note: "Agent edits are isolated in a git worktree until you upmerge them.",
-    pendingFiles: [],
-    conflictedFiles: [],
-  });
+  const blockedPublish = await worktree.upmergeRelativePath("notes.txt");
+  expect(blockedPublish).toContain("Resolve it in the worktree before publishing");
 
   await worktree.cleanupWorkspaceSession();
   worktree.restoreWorkspaceSession(null);
 });
 
-test("worktree upmerge detects binary conflicts and supports accepting the worktree version", async () => {
+test("worktree publish conflicts no longer write conflict markers into main", async () => {
   const repoPath = await createTempGitRepo({
     "blob.bin": "base",
   });
@@ -171,7 +183,9 @@ test("worktree upmerge detects binary conflicts and supports accepting the workt
     mode: "worktree",
     note: "Agent edits are isolated in a git worktree until you upmerge them.",
     pendingFiles: [],
-    conflictedFiles: [{ path: "blob.bin", type: "binary", status: "pending" }],
+    conflictedFiles: [
+      { path: "blob.bin", type: "binary", status: "pending", phase: "publish" },
+    ],
   });
 
   const preview = await worktree.getUpmergePreview("blob.bin");
@@ -192,6 +206,50 @@ test("worktree upmerge detects binary conflicts and supports accepting the workt
     pendingFiles: [],
     conflictedFiles: [],
   });
+
+  await worktree.cleanupWorkspaceSession();
+  worktree.restoreWorkspaceSession(null);
+});
+
+test("text publish conflicts no longer write conflict markers into main", async () => {
+  const repoPath = await createTempGitRepo({
+    "notes.txt": ["start", "shared", "end", ""].join("\n"),
+  });
+  const worktreeModule = await loadWorktreeModuleForRepo();
+  const worktree = worktreeModule.createWorkspaceSessionManager(path.resolve(repoPath));
+
+  worktree.setWorkspaceSessionStorageRoot(path.join(repoPath, ".session-publish-text"));
+  worktree.restoreWorkspaceSession(null);
+  await worktree.prepareWorkspaceForEdit();
+
+  const mainPath = worktree.resolveOriginalWorkspacePath("notes.txt");
+  await worktree.trackEditTarget("notes.txt");
+  const worktreePath = path.join(worktree.getActiveWorkspaceRoot(), "notes.txt");
+
+  await fs.writeFile(worktreePath, ["start", "worktree change", "end", ""].join("\n"), "utf8");
+  await fs.writeFile(mainPath, ["start", "main change", "end", ""].join("\n"), "utf8");
+
+  const result = await worktree.upmergeRelativePath("notes.txt");
+  expect(result).toContain("publishing was blocked");
+  expect(result).toContain("Merge main into the worktree again and resolve there before retrying.");
+
+  expect(await fs.readFile(mainPath, "utf8")).toBe(["start", "main change", "end", ""].join("\n"));
+  expect(await fs.readFile(worktreePath, "utf8")).toBe(["start", "worktree change", "end", ""].join("\n"));
+
+  expect(await worktree.getUpmergeStatus()).toEqual({
+    mode: "worktree",
+    note: "Agent edits are isolated in a git worktree until you upmerge them.",
+    pendingFiles: [],
+    conflictedFiles: [
+      { path: "notes.txt", type: "text", status: "pending", phase: "publish" },
+    ],
+  });
+
+  const preview = await worktree.getUpmergePreview("notes.txt");
+  expect(preview).toContain("Text upmerge conflict: notes.txt");
+  expect(preview).not.toContain("conflict region");
+  expect(preview).toContain("main change");
+  expect(preview).not.toContain("<<<<<<< ");
 
   await worktree.cleanupWorkspaceSession();
   worktree.restoreWorkspaceSession(null);

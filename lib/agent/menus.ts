@@ -67,10 +67,11 @@ export async function refreshUpmergeState(options: {
 
   upmergeItems.push(
     ...status.conflictedFiles.map((entry) => ({
-      label: `${entry.type === "text" ? "[text conflict]" : "[binary conflict]"} ${entry.path}`,
+      label: `${entry.phase === "sync-down" ? "[worktree merge conflict]" : entry.type === "text" ? "[text conflict]" : "[binary conflict]"} ${entry.path}`,
       path: entry.path,
       kind: "conflict" as const,
       conflictType: entry.type,
+      conflictPhase: entry.phase,
     }))
   );
 

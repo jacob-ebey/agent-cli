@@ -44,6 +44,7 @@ export type UpmergeMenuItem = {
   path: string | null;
   kind?: "action" | "pending" | "conflict";
   conflictType?: "text" | "binary";
+  conflictPhase?: "publish" | "sync-down";
   action?: "upmerge-all";
 };
 
