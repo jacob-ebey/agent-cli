@@ -6,6 +6,8 @@ import {
   type KeyEvent,
 } from "@opentui/core";
 
+import type { Mode } from "./types.ts";
+
 export class ComposerTextarea extends TextareaRenderable {
   mode: string = "normal";
 
@@ -21,6 +23,45 @@ export class ComposerTextarea extends TextareaRenderable {
     return super.handleKeyPress(key);
   }
 }
+
+export type ComposerModeConfig = {
+  title: string;
+  borderColor: string;
+  placeholder: string;
+};
+
+export const COMPOSER_MODE_CONFIG: Record<Mode, ComposerModeConfig> = {
+  normal: {
+    title: "-- NORMAL --",
+    borderColor: "#334155",
+    placeholder:
+      "Press i to insert, : for commands, !/@ for shell, u for upmerge, or :history",
+  },
+  insert: {
+    title: "-- INSERT -- [history]",
+    borderColor: "#3b82f6",
+    placeholder:
+      "Type a message. Enter sends, Shift+Enter adds a new line, Up/Down browse history",
+  },
+  command: {
+    title: ": [history]",
+    borderColor: "#f59e0b",
+    placeholder:
+      "clear(c)  history(h)  model anthropic  index  summarize  quit(q)  (Up/Down history)",
+  },
+  shell: {
+    title: "-- SHELL -- [history]",
+    borderColor: "#14b8a6",
+    placeholder:
+      "Type a shell command. Enter runs it locally. Up/Down browse history",
+  },
+  agent_shell: {
+    title: "-- AGENT SHELL -- [history]",
+    borderColor: "#8b5cf6",
+    placeholder:
+      "Type a shell command. Enter runs it and shares output with the agent. Up/Down history",
+  },
+};
 
 export function createAgentView(renderer: ConstructorParameters<typeof BoxRenderable>[0]) {
   const app = new BoxRenderable(renderer, {

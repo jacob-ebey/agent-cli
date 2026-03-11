@@ -117,7 +117,11 @@ import {
   clearTranscriptEntries,
   restoreTranscriptEntries,
 } from "./lib/agent/transcript-view.ts";
-import { ComposerTextarea, createAgentView } from "./lib/agent/view.ts";
+import {
+  COMPOSER_MODE_CONFIG,
+  ComposerTextarea,
+  createAgentView,
+} from "./lib/agent/view.ts";
 import { indexSkills } from "./lib/skills-index.ts";
 import {
   captureWorkspaceSession,
@@ -557,6 +561,20 @@ function describeModelOptions() {
   ].join("\n");
 }
 
+type ShellMessageState = {
+  command: string;
+  cwdLabel: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  startupError: string | null;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+  running: boolean;
+  visibility: ShellVisibility;
+};
+
 function formatShellMessage({
   command,
   cwdLabel,
@@ -569,19 +587,7 @@ function formatShellMessage({
   stderrTruncated,
   running,
   visibility,
-}: {
-  command: string;
-  cwdLabel: string;
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-  signal: NodeJS.Signals | null;
-  startupError: string | null;
-  stdoutTruncated: boolean;
-  stderrTruncated: boolean;
-  running: boolean;
-  visibility: ShellVisibility;
-}) {
+}: ShellMessageState) {
   const summaryLine = running
     ? "Status: running"
     : startupError
@@ -651,6 +657,10 @@ function modeToHistoryMode(currentMode: Mode): HistoryMode | null {
   }
 
   return currentMode;
+}
+
+function isHistoryMode(currentMode: Mode): currentMode is HistoryMode {
+  return currentMode !== "normal";
 }
 
 function currentDraftForMode(currentMode: HistoryMode) {
@@ -1170,6 +1180,24 @@ async function deleteSelectedHistoryConversation() {
   renderer.requestRender();
 }
 
+function applyComposerModeConfig(nextMode: Mode) {
+  const config = COMPOSER_MODE_CONFIG[nextMode];
+  composer.title = config.title;
+  composer.borderColor = config.borderColor;
+  input.placeholder = config.placeholder;
+}
+
+function focusComposerWithDraft(nextMode: Exclude<Mode, "normal">, draft: string) {
+  setComposerText(draft);
+  process.nextTick(() => {
+    if (mode === nextMode) {
+      input.focus();
+      moveComposerCursorToEnd(draft);
+      renderer.requestRender();
+    }
+  });
+}
+
 function setMode(nextMode: Mode) {
   if (nextMode !== "normal") {
     closeUpmergeMenu();
@@ -1179,65 +1207,19 @@ function setMode(nextMode: Mode) {
 
   mode = nextMode;
   input.mode = nextMode;
+  applyComposerModeConfig(nextMode);
 
-  if (mode === "insert") {
-    composer.title = "-- INSERT -- [history]";
-    composer.borderColor = "#3b82f6";
-    input.placeholder =
-      "Type a message. Enter sends, Shift+Enter adds a new line, Up/Down browse history";
-    setComposerText(insertDraft);
-    process.nextTick(() => {
-      if (mode === "insert") {
-        input.focus();
-        moveComposerCursorToEnd(insertDraft);
-        renderer.requestRender();
-      }
-    });
-  } else if (mode === "command") {
-    composer.title = ": [history]";
-    composer.borderColor = "#f59e0b";
-    input.placeholder =
-      "clear(c)  history(h)  model anthropic  index  summarize  quit(q)  (Up/Down history)";
-    setComposerText(commandDraft);
-    process.nextTick(() => {
-      if (mode === "command") {
-        input.focus();
-        moveComposerCursorToEnd(commandDraft);
-        renderer.requestRender();
-      }
-    });
-  } else if (mode === "shell") {
-    composer.title = "-- SHELL -- [history]";
-    composer.borderColor = "#14b8a6";
-    input.placeholder = "Type a shell command. Enter runs it locally. Up/Down browse history";
-    setComposerText(shellDraft);
-    process.nextTick(() => {
-      if (mode === "shell") {
-        input.focus();
-        moveComposerCursorToEnd(shellDraft);
-        renderer.requestRender();
-      }
-    });
-  } else if (mode === "agent_shell") {
-    composer.title = "-- AGENT SHELL -- [history]";
-    composer.borderColor = "#8b5cf6";
-    input.placeholder =
-      "Type a shell command. Enter runs it and shares output with the agent. Up/Down history";
-    setComposerText(agentShellDraft);
-    process.nextTick(() => {
-      if (mode === "agent_shell") {
-        input.focus();
-        moveComposerCursorToEnd(agentShellDraft);
-        renderer.requestRender();
-      }
-    });
-  } else {
-    composer.title = "-- NORMAL --";
-    composer.borderColor = "#334155";
-    input.placeholder =
-      "Press i to insert, : for commands, !/@ for shell, u for upmerge, or :history";
+  if (mode === "normal") {
     setComposerText("");
     input.blur();
+  } else if (mode === "insert") {
+    focusComposerWithDraft(mode, insertDraft);
+  } else if (mode === "command") {
+    focusComposerWithDraft(mode, commandDraft);
+  } else if (mode === "shell") {
+    focusComposerWithDraft(mode, shellDraft);
+  } else {
+    focusComposerWithDraft(mode, agentShellDraft);
   }
 
   updateComposerHint();
@@ -1727,20 +1709,8 @@ async function executeCommand(raw: string) {
   setMode("normal");
 }
 
-async function executeShellInput(raw: string, visibility: ShellVisibility) {
-  const command = raw.trim();
-
-  if (!command) {
-    return;
-  }
-
-  const cwdLabel = ".";
-
-  let stdout = "";
-  let stderr = "";
-  let stdoutTruncated = false;
-  let stderrTruncated = false;
-  let shellResult: ShellExecutionResult = {
+function createInitialShellExecutionResult(): ShellExecutionResult {
+  return {
     stdout: "",
     stderr: "",
     exitCode: null,
@@ -1749,65 +1719,74 @@ async function executeShellInput(raw: string, visibility: ShellVisibility) {
     stdoutTruncated: false,
     stderrTruncated: false,
   };
+}
+
+function createShellMessageState(
+  command: string,
+  visibility: ShellVisibility,
+  result: ShellExecutionResult,
+  running: boolean,
+  cwdLabel = "."
+): ShellMessageState {
+  return {
+    command,
+    cwdLabel,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    exitCode: result.exitCode,
+    signal: result.signal,
+    startupError: result.startupError,
+    stdoutTruncated: result.stdoutTruncated,
+    stderrTruncated: result.stderrTruncated,
+    running,
+    visibility,
+  };
+}
+
+function createShellTranscriptEntry(command: string, visibility: ShellVisibility) {
+  let shellResult = createInitialShellExecutionResult();
+  const initialState = createShellMessageState(command, visibility, shellResult, true);
   const transcriptIndex =
     transcriptHistory.push({
       role: "system",
-      content: formatShellMessage({
-        command,
-        cwdLabel,
-        stdout,
-        stderr,
-        exitCode: null,
-        signal: null,
-        startupError: null,
-        stdoutTruncated,
-        stderrTruncated,
-        running: true,
-        visibility,
-      }),
+      content: formatShellMessage(initialState),
     }) - 1;
 
-  const entry = appendEntry(
-    "system",
-    formatShellMessage({
-      command,
-      cwdLabel,
-      stdout,
-      stderr,
-      exitCode: null,
-      signal: null,
-      startupError: null,
-      stdoutTruncated,
-      stderrTruncated,
-      running: true,
-      visibility,
-    }),
-    { recordInTranscript: false }
-  );
+  const entry = appendEntry("system", formatShellMessage(initialState), {
+    recordInTranscript: false,
+  });
 
-  const refreshEntry = (running: boolean) => {
-    const content =
-      formatShellMessage({
-        command,
-        cwdLabel,
-        stdout,
-        stderr,
-        exitCode: shellResult.exitCode,
-        signal: shellResult.signal,
-        startupError: shellResult.startupError,
-        stdoutTruncated,
-        stderrTruncated,
-        running,
-        visibility,
-      }) || " ";
-    entry.body.content = content;
-    transcriptHistory[transcriptIndex] = {
-      role: "system",
-      content,
-    };
-    renderer.requestRender();
-    scrollToBottom();
+  return {
+    update(result: ShellExecutionResult, running: boolean) {
+      shellResult = result;
+      const content = formatShellMessage(
+        createShellMessageState(command, visibility, shellResult, running)
+      );
+      entry.body.content = content || " ";
+      transcriptHistory[transcriptIndex] = {
+        role: "system",
+        content,
+      };
+      renderer.requestRender();
+      scrollToBottom();
+    },
+    snapshot(running: boolean) {
+      return formatShellMessage(
+        createShellMessageState(command, visibility, shellResult, running)
+      );
+    },
   };
+}
+
+async function executeShellInput(raw: string, visibility: ShellVisibility) {
+  const command = raw.trim();
+
+  if (!command) {
+    return;
+  }
+
+  let shellResult = createInitialShellExecutionResult();
+  const shellEntry = createShellTranscriptEntry(command, visibility);
 
   setBusy(true);
   updateComposerHint();
@@ -1824,37 +1803,17 @@ async function executeShellInput(raw: string, visibility: ShellVisibility) {
         activeShellProcess = null;
       },
       onUpdate: (state) => {
-        stdout = state.stdout;
-        stderr = state.stderr;
-        stdoutTruncated = state.stdoutTruncated;
-        stderrTruncated = state.stderrTruncated;
         shellResult = state.result;
-        refreshEntry(state.running);
+        shellEntry.update(shellResult, state.running);
       },
     });
 
-    stdout = shellResult.stdout;
-    stderr = shellResult.stderr;
-    stdoutTruncated = shellResult.stdoutTruncated;
-    stderrTruncated = shellResult.stderrTruncated;
-    refreshEntry(false);
+    shellEntry.update(shellResult, false);
 
     if (visibility === "agent") {
       pushConversationMessage({
         role: "system",
-        content: formatShellMessage({
-          command,
-          cwdLabel,
-          stdout,
-          stderr,
-          exitCode: shellResult.exitCode,
-          signal: shellResult.signal,
-          startupError: shellResult.startupError,
-          stdoutTruncated,
-          stderrTruncated,
-          running: false,
-          visibility,
-        }),
+        content: shellEntry.snapshot(false),
       });
     }
     await persistActiveConversation();
@@ -2265,46 +2224,20 @@ function handleGlobalKey(key: KeyEvent) {
 
 renderer.keyInput.on("keypress", handleGlobalKey);
 
-input.onContentChange = () => {
-  const value = input.plainText;
+function syncComposerDraft(value: string) {
+  const currentMode = isHistoryMode(mode) ? mode : "insert";
+  setDraftForMode(currentMode, value);
+  syncHistoryDraft({
+    currentMode,
+    value,
+    inputHistory,
+    historyCursor,
+    historyDrafts,
+  });
+}
 
-  if (mode === "command") {
-    commandDraft = value;
-    syncHistoryDraft({
-      currentMode: "command",
-      value,
-      inputHistory,
-      historyCursor,
-      historyDrafts,
-    });
-  } else if (mode === "shell") {
-    shellDraft = value;
-    syncHistoryDraft({
-      currentMode: "shell",
-      value,
-      inputHistory,
-      historyCursor,
-      historyDrafts,
-    });
-  } else if (mode === "agent_shell") {
-    agentShellDraft = value;
-    syncHistoryDraft({
-      currentMode: "agent_shell",
-      value,
-      inputHistory,
-      historyCursor,
-      historyDrafts,
-    });
-  } else {
-    insertDraft = value;
-    syncHistoryDraft({
-      currentMode: "insert",
-      value,
-      inputHistory,
-      historyCursor,
-      historyDrafts,
-    });
-  }
+input.onContentChange = () => {
+  syncComposerDraft(input.plainText);
   updateComposerHint();
 };
 
