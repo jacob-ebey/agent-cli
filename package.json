@@ -2,12 +2,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node agent.ts",
-    "typecheck": "pnpm exec tsc --noEmit"
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
   },
   "packageManager": "pnpm@10.12.1",
   "devDependencies": {
     "@types/node": "^24.0.13",
+    "bun-types": "latest",
     "typescript": "^5.8.3"
   },
   "dependencies": {

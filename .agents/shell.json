@@ -1,5 +1,5 @@
 {
   "version": 1,
-  "startupCommands": ["pnpm i"],
-  "approvedCommands": ["pnpm typecheck"]
+  "approvedCommands": ["bun typecheck", "bun test"],
+  "startupCommands": ["bun i"]
 }
