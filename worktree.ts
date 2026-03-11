@@ -597,6 +597,10 @@ export function getActiveWorkspaceRoot() {
     : ORIGINAL_WORKSPACE_ROOT;
 }
 
+export function getActiveWorkspaceAbsolutePath() {
+  return getActiveWorkspaceRoot();
+}
+
 export function resolveOriginalWorkspacePath(targetPath: string) {
   return resolvePathWithinRoot(ORIGINAL_WORKSPACE_ROOT, targetPath);
 }

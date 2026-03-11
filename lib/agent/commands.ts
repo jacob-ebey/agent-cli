@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
@@ -22,6 +23,7 @@ export function describeHelpOptions(currentModel: string) {
     ":model ...  switch to a preset or explicit model id",
     ":plan       show the current .agents/PLAN.md",
     ":summarize  compress the current chat history",
+    ":worktree   copy the active absolute workspace/worktree path",
     ":quit       exit the UI",
     "",
     describeModelOptions(currentModel),
@@ -404,6 +406,69 @@ export async function showPlanCommand(options: {
     const message = error instanceof Error ? error.message : String(error);
     options.appendEntry("error", `Failed to read PLAN.md.\n\n${message}`);
     options.updateSidebar("Failed to read PLAN.md.");
+  }
+}
+
+async function spawnClipboardCommand(command: string, args: string[], input: string) {
+  return await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ["pipe", "ignore", "pipe"],
+    });
+
+    let stderr = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if ((code ?? 0) === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(stderr.trim() || `${command} exited with code ${code ?? 0}.`));
+    });
+
+    child.stdin?.end(input);
+  });
+}
+
+export async function copyWorktreePathCommand(options: {
+  worktreePath: string;
+  setCommandDraft: (value: string) => void;
+  setModeNormal: () => void;
+  appendSystemMessage: (content: string) => void;
+  appendEntry: (role: "error", content: string) => void;
+  updateSidebar: (note: string) => void;
+}) {
+  options.setCommandDraft("");
+  options.setModeNormal();
+
+  const platform = process.platform;
+
+  try {
+    if (platform === "darwin") {
+      await spawnClipboardCommand("pbcopy", [], options.worktreePath);
+    } else if (platform === "win32") {
+      await spawnClipboardCommand("clip", [], options.worktreePath);
+    } else {
+      try {
+        await spawnClipboardCommand("wl-copy", [], options.worktreePath);
+      } catch {
+        await spawnClipboardCommand("xclip", ["-selection", "clipboard"], options.worktreePath);
+      }
+    }
+
+    options.appendSystemMessage(`Copied active workspace path to clipboard.\n\n\`${options.worktreePath}\``);
+    options.updateSidebar("Copied active workspace path to clipboard.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    options.appendEntry(
+      "error",
+      `Failed to copy the active workspace path to the clipboard.\n\nPath:\n\`${options.worktreePath}\`\n\n${message}`
+    );
+    options.updateSidebar("Failed to copy active workspace path to clipboard.");
   }
 }
 

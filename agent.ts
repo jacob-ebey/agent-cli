@@ -141,6 +141,7 @@ import {
   syncComposerDraft,
 } from "./lib/agent/input-controller.ts";
 import {
+  copyWorktreePathCommand,
   describeHelpOptions,
   describeModelOptions,
   resolveRequestedModel,
@@ -152,6 +153,7 @@ import {
 import {
   captureWorkspaceSession,
   cleanupWorkspaceSession,
+  getActiveWorkspaceAbsolutePath,
   prepareWorkspaceForEdit,
   relativeOriginalWorkspacePath,
   revertRelativePath,
@@ -1232,6 +1234,21 @@ async function runPlanCommand() {
   scrollToBottom(true);
 }
 
+async function runWorktreeCommand() {
+  await copyWorktreePathCommand({
+    worktreePath: getActiveWorkspaceAbsolutePath(),
+    setCommandDraft: (value) => {
+      commandDraft = value;
+    },
+    setModeNormal: () => setMode("normal"),
+    appendSystemMessage,
+    appendEntry: (role, content) => appendEntry(role, content),
+    updateSidebar,
+  });
+  renderer.requestRender();
+  scrollToBottom(true);
+}
+
 function runHelpCommand() {
   commandDraft = "";
   setMode("normal");
@@ -1291,6 +1308,11 @@ async function executeCommand(raw: string) {
 
   if (command === "summarize" || command === "summary") {
     await summarizeActiveConversation();
+    return;
+  }
+
+  if (command === "worktree") {
+    await runWorktreeCommand();
     return;
   }
 
