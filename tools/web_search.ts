@@ -43,6 +43,12 @@ type SearchResult = {
   source: string;
 };
 
+type DuckDuckGoHtmlResult = {
+  title: string;
+  url: string;
+  snippet: string;
+};
+
 function clampInteger(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
@@ -102,7 +108,38 @@ function collectTopicResults(value: unknown, collected: SearchResult[]) {
   }
 }
 
-async function fetchWithTimeout(url: string, timeoutMs: number) {
+function decodeHtmlEntities(value: string) {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#x2F;/gi, "/")
+    .replace(/&#x27;/gi, "'");
+}
+
+function parseHtmlSearchResults(html: string): DuckDuckGoHtmlResult[] {
+  const results: DuckDuckGoHtmlResult[] = [];
+  const resultPattern = /<a\s+[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:<a\s+[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>|<div\s+[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/div>)/gi;
+
+  for (const match of html.matchAll(resultPattern)) {
+    const [, rawUrl = "", rawTitle = "", rawSnippetA = "", rawSnippetDiv = ""] = match;
+    const url = decodeHtmlEntities(rawUrl.trim());
+    const title = stripHtml(decodeHtmlEntities(rawTitle));
+    const snippet = stripHtml(decodeHtmlEntities(rawSnippetA || rawSnippetDiv));
+
+    if (!url || !title || !snippet) {
+      continue;
+    }
+
+    results.push({ title, url, snippet });
+  }
+
+  return results;
+}
+
+async function fetchWithTimeout(url: string, timeoutMs: number, accept: string) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -110,7 +147,7 @@ async function fetchWithTimeout(url: string, timeoutMs: number) {
     return await fetch(url, {
       signal: controller.signal,
       headers: {
-        Accept: "application/json",
+        Accept: accept,
         "User-Agent": USER_AGENT,
       },
     });
@@ -146,7 +183,11 @@ export const execute: ToolHandler = async (argumentsObject) => {
   endpoint.searchParams.set("no_html", "1");
   endpoint.searchParams.set("skip_disambig", "0");
 
-  const response = await fetchWithTimeout(endpoint.toString(), timeoutMs);
+  const response = await fetchWithTimeout(
+    endpoint.toString(),
+    timeoutMs,
+    "application/json, text/javascript;q=0.9, */*;q=0.1"
+  );
   if (!response.ok) {
     throw new Error(`Web search failed with HTTP ${response.status}.`);
   }
@@ -176,6 +217,27 @@ export const execute: ToolHandler = async (argumentsObject) => {
 
   collectTopicResults(payload.Results, results);
   collectTopicResults(payload.RelatedTopics, results);
+
+  if (results.length === 0) {
+    const htmlEndpoint = new URL("https://html.duckduckgo.com/html/");
+    htmlEndpoint.searchParams.set("q", query.trim());
+
+    const htmlResponse = await fetchWithTimeout(
+      htmlEndpoint.toString(),
+      timeoutMs,
+      "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    );
+
+    if (htmlResponse.ok) {
+      const html = await htmlResponse.text();
+      results.push(
+        ...parseHtmlSearchResults(html).map((result) => ({
+          ...result,
+          source: "DuckDuckGo HTML search",
+        }))
+      );
+    }
+  }
 
   const uniqueResults = results.filter(
     (result, index, array) => array.findIndex((entry) => entry.url === result.url) === index

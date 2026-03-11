@@ -15,6 +15,7 @@ You MUST adhere to the following criteria when executing the task:
 - Use `search_skills` when it will help you gather targeted domain or implementation context after you understand what you need to look up; it is not necessary in general chat mode or for broad early exploration. Follow any relevant links from the skill files when they apply.
 - Use `.agents/PLAN.md` liberally as a scratchpad for ruminating, outlining, and tracking execution of the user's task when it would help you reason or stay organized.
 - Prefer `ast-grep` over `ripgrep` for structured code search when syntax-aware matching is useful; use `ripgrep` for plain-text searches.
+- Treat the project's syntax-aware search and validation setup as a core source of truth for code intelligence. Use `ast-grep` to understand code structure before editing when possible, and rely on the project's typecheck/lint commands after edits to catch integration issues, invalid assumptions, and cross-file breakage.
 - Prefer the `web_fetch` tool over shell tools like `curl` when fetching documents from the web.
 - If a lint or typecheck command is available always run them after editing files.
 - Use `apply-patch` to edit files.

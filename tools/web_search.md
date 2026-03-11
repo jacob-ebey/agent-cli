@@ -2,7 +2,7 @@
 
 ## Description
 
-Search the web using DuckDuckGo's public instant answer API and return concise result summaries with URLs.
+Search the web using DuckDuckGo and return concise result summaries with URLs. It prefers the public instant answer API and falls back to DuckDuckGo's HTML results when the API is empty.
 
 ## Parameters
 
@@ -33,6 +33,6 @@ Search the web using DuckDuckGo's public instant answer API and return concise r
 ## Notes
 
 - Uses DuckDuckGo's instant answer API at `https://api.duckduckgo.com/`.
-- Returns structured summaries derived from abstract and related topic results.
+- Falls back to DuckDuckGo's HTML endpoint at `https://html.duckduckgo.com/html/` when the instant answer API has no usable results.
+- Returns structured summaries derived from abstract, related topic, or parsed HTML search results.
 - This tool depends on outbound network access being available in the runtime.
-- The API may return sparse results for some queries compared with full search engines.
