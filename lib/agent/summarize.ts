@@ -43,6 +43,8 @@ export function buildConversationSummaryPrompt(
     "- details that can be rediscovered from the repository",
     "- repetitive back-and-forth",
     "",
+    "Output plain text only. Never include code blocks, fenced code blocks, inline code snippets, or markdown formatting that makes the summary look like code.",
+    "Write a descriptive text summary of the conversation, the work completed so far, and what still needs to be done.",
     "Output plain text using this structure exactly:",
     "Summary:",
     "<short paragraph>",

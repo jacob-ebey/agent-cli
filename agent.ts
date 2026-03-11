@@ -1221,7 +1221,7 @@ async function runAgentsMdCommandFlow() {
 
 async function runPlanCommand() {
   await showPlanCommand({
-    planPath: path.join(WORKSPACE_ROOT, ".agents", "PLAN.md"),
+    planPath: path.join(getActiveWorkspaceAbsolutePath(), ".agents", "PLAN.md"),
     setCommandDraft: (value) => {
       commandDraft = value;
     },

@@ -395,17 +395,21 @@ export async function showPlanCommand(options: {
   options.setCommandDraft("");
   options.setModeNormal();
 
+  const displayPath = path.relative(process.cwd(), options.planPath) || ".agents/PLAN.md";
+
   try {
     const content = await fs.readFile(options.planPath, "utf8");
     const trimmed = content.trim();
     options.appendSystemMessage(
-      trimmed ? `Current PLAN.md\n\n${trimmed}` : "Current PLAN.md is empty."
+      trimmed
+        ? `Current ${displayPath}\n\n${trimmed}`
+        : `Current ${displayPath} is empty.`
     );
-    options.updateSidebar("Displayed current PLAN.md.");
+    options.updateSidebar(`Displayed current ${displayPath}.`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    options.appendEntry("error", `Failed to read PLAN.md.\n\n${message}`);
-    options.updateSidebar("Failed to read PLAN.md.");
+    options.appendEntry("error", `Failed to read ${displayPath}.\n\n${message}`);
+    options.updateSidebar(`Failed to read ${displayPath}.`);
   }
 }
 
