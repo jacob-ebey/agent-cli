@@ -5,74 +5,83 @@
 - `agent-cli` is a terminal-based agentic coding assistant implemented in TypeScript and ESM.
 - The runtime centers on `agent.ts`, which wires together the TUI, conversation state, tool loading, approvals, streaming, shell execution, and worktree support.
 - Tool definitions live in `tools/*.md`; executable implementations live in the matching `tools/*.ts` module.
-- The app operates in the current workspace and, when available, can isolate edits in an agent-managed git worktree.
+- The app operates in the current workspace and, when available, isolates edits in an agent-managed git worktree.
+- Root `AGENTS.md` content is loaded as additive system guidance on startup.
 
 ## Standard Commands
 
-- Prefer running project commands through Bun, using the `bun <command>` form whenever possible.
+- Prefer Bun-based commands when working in this repo.
 - Install dependencies: `bun install`
 - Start the app: `bun run agent.ts`
 - Typecheck: `bun typecheck`
 - Tests: `bun test`
-- There are no declared build or lint scripts in `package.json`; the primary scripted validation command is `bun typecheck`.
+- There are no declared build or lint scripts in `package.json`; `bun typecheck` is the main scripted validation command.
 
 ## Repo Map
 
 - `agent.ts`
-  - Main entrypoint and orchestration for UI, tool execution, approvals, streaming, and worktree integration.
+  - Main entrypoint and orchestration for UI, tool execution, approvals, streaming, persistence, and worktree integration.
 - `worktree.ts`
-  - Git worktree session management, workspace path resolution, baseline capture, restore, and upmerge helpers.
+  - Git worktree session management, workspace path resolution, baseline capture, merge/downsync handling, conflict tracking, revert, and upmerge flows.
 - `lib/llm.ts`
-  - Model/provider integration, response streaming, embeddings, and model listing.
+  - Model/provider integration, streaming, embeddings, and model listing for remote OpenAI-compatible backends and local Ollama.
 - `lib/skills-index.ts`
-  - Skill discovery, markdown chunking, embedding generation, and similarity search over `.agents/skills/*/SKILL.md`.
+  - Skill discovery under `.agents/skills/`, markdown chunking, embedding generation, and similarity search over indexed skill chunks.
+- `lib/event-stream-decoder.ts`
+  - SSE/event-stream decoder; covered by dedicated tests.
 - `lib/agent/`
-  - `commands.ts`: colon commands such as `:agents-md`, `:index`, `:model`, `:plan`, `:summarize`, `:worktree`
+  - `commands.ts`: colon commands such as `:agents-md`, `:index`, `:model`, `:plan`, `:merge`, `:summarize`, `:worktree`
   - `config-store.ts`: persisted config, root `AGENTS.md` loading, `.agents/PLAN.md` bootstrap, shell approval persistence
   - `conversation-store.ts`: active/previous conversation state and history persistence
   - `approvals.ts`: tool and shell approval flow
   - `shell-runner.ts`, `shell-session.ts`: shell execution and transcript formatting
-  - `streaming.ts`: single-turn LLM/tool streaming loop
-  - `tools.ts`: tool definition parsing, validation, loading, and seeded tool messages
-  - `view.ts`, `view-models.ts`, `menus.ts`, `input-controller.ts`: TUI behavior and menus
+  - `streaming.ts`, `stream-state.ts`: streaming loop and assistant stream state machine
+  - `tools.ts`: tool definition parsing, validation, loading, seeded tool messages, and tool-result summaries
+  - `view.ts`, `view-models.ts`, `menus.ts`, `input-controller.ts`: TUI behavior, menus, composer/history interactions
+  - `summarize.ts`: transcript compaction helpers and summarization prompts
 - `tools/`
   - Machine-readable tool docs (`*.md`) plus executable implementations (`*.ts`).
-  - `system-prompt.md` is special: it is used as the base system prompt and is not loaded as a callable tool.
-- `.agents/skills/`
-  - Local skill packs with `SKILL.md` files and optional supporting docs.
-- `.agents/skills-index.json`
-  - Generated embedding index for skill search.
-- `.agents/shell.json`
-  - Workspace-managed shell approval and startup command config.
+  - `system-prompt.md` is special: it is used as base prompt text and is not loaded as a callable tool.
+  - `create_agents_context.ts` returns JSON containing the final markdown that `:agents-md` writes to the repo root.
+- `test/`
+  - Bun tests covering integration/worktree behavior plus the event stream decoder.
+- `.agents/`
+  - `PLAN.md`: scratchpad created on startup if missing
+  - `shell.json`: workspace-managed shell approvals/startup command config
+  - `skills/`: local skill packs with `SKILL.md`
+  - `skills-index.json`: generated embedding index
 
 ## Important Invariants
 
 - Tool definition filenames must match tool names exactly.
   - `lib/agent/tools.ts` enforces that `tools/<name>.md` declares the same name and that `tools/<name>.ts` exports `execute`.
 - `tools/system-prompt.md` is excluded from tool loading and used only as prompt text.
-- Workspace paths for edit-sensitive flows must stay inside the workspace root.
-  - `worktree.ts` rejects paths that resolve outside the root.
 - `agent.ts` always calls `ensurePlanFileReady()` during startup.
   - This creates `.agents/PLAN.md` if missing.
+- Initial tool context is seeded automatically.
+  - `lib/agent/constants.ts` seeds `list_project_tree` and `read_file package.json` for normal sessions.
+  - The AGENTS flow additionally seeds `read_file AGENTS.md`.
+- Workspace paths for edit-sensitive flows must stay inside the workspace root.
+  - `worktree.ts` resolves paths against the workspace root and throws if a path escapes it.
 - `.agents/PLAN.md` is intentionally excluded from upmerge.
   - `worktree.ts` hard-codes it in `UPMERGE_IGNORED_PATHS`.
 - The `:agents-md` flow is read-only until final writeback.
-  - `commands.ts` restricts the sub-agent to discovery tools plus `create_agents_context`, then writes the returned markdown to the repo root.
-- Initial conversation/tool context is seeded automatically.
-  - `lib/agent/constants.ts` defines startup tool seeds for `list_project_tree`, `read_file package.json`, and for AGENTS generation also `read_file AGENTS.md`.
+  - `commands.ts` restricts the sub-agent to discovery tools plus `create_agents_context`, then writes the returned markdown to `AGENTS.md`.
+- Shell approval persistence is exact-string based.
+  - Small command text changes do not match previously approved commands.
 
 ## Preferred Patterns
 
 - When adding or changing a tool, update both files:
-  - `tools/<name>.md` for schema/docs
+  - `tools/<name>.md` for schema/docs/metadata
   - `tools/<name>.ts` for implementation
 - Keep path handling explicit and rooted.
-  - Reuse existing workspace/worktree helpers instead of ad hoc `path.resolve` logic.
+  - Reuse workspace/worktree helpers instead of ad hoc path resolution.
 - Preserve the current subsystem split inside `lib/agent/`.
   - UI, approvals, persistence, shell execution, streaming, commands, and summaries are already separated.
-- Treat root `AGENTS.md` as additive system guidance.
-  - `loadInitialSystemMessage()` appends root `AGENTS.md` content after `tools/system-prompt.md` when present.
-- Keep generated workspace state in existing machine-managed locations rather than inventing new ones.
+- Treat root `AGENTS.md` as additive guidance, not a replacement for `tools/system-prompt.md`.
+- Keep generated workspace state in existing machine-managed locations rather than inventing new files/dirs.
+- Prefer Bun for local scripts and validation, even though `packageManager` is `pnpm@10.12.1` in `package.json`.
 
 ## Environment / Services
 
@@ -89,6 +98,7 @@
   - `ollama:qwen3.5:latest`
 - Remote OpenAI-compatible model listing uses `/models`.
 - Ollama model listing uses `/api/tags`.
+- Embedding/index flows depend on the remote embedding model configuration, not Ollama.
 
 ## Persistence / Generated State
 
@@ -110,7 +120,8 @@
 
 ## Validation
 
-- After code changes, prefer Bun-based commands and run: `bun typecheck`
+- After code changes, run `bun typecheck`.
+- When behavior changes touch runtime flows, also run `bun test`.
 - After tool changes, verify both sides of the contract still line up:
   - `tools/<name>.md` name matches filename
   - `tools/<name>.ts` exports `execute`
@@ -118,25 +129,27 @@
   - `lib/agent/constants.ts`
   - `lib/agent/config-store.ts`
   - `worktree.ts`
+- If changing streaming/SSE handling, re-check `lib/event-stream-decoder.ts` and its tests.
 
 ## Sharp Edges
 
-- `lib/llm.ts` only requires `OPENAI_API_BASE` and `OPENAI_API_KEY` for non-ollama models, but remote features like embeddings and remote model listing still depend on them.
+- Remote model access is unavailable unless `OPENAI_API_BASE` and `OPENAI_API_KEY` are set.
+  - Ollama chat models can still work locally via `ollama:*` model ids.
+- Remote features like embeddings and remote model listing still depend on the OpenAI-compatible gateway env vars.
 - Worktree behavior is optimistic, not guaranteed.
-  - The default note says a git worktree will be created on first edit when available.
-  - Code should not assume direct writes or worktree isolation is always active.
-- Startup commands may run inside the worktree session.
-  - Prefer Bun-style startup commands as well; for example, use `bun install` rather than pnpm-based equivalents.
-- Always-approved shell commands are matched by exact command string.
-  - Small text changes can bypass prior approvals.
-- Skill indexing depends on embeddings and the generated `.agents/skills-index.json`; if embeddings are unavailable, `:index`/skill search flows may fail or be stale.
+  - The initial note says a git worktree will be created on first edit when available.
+  - Code should not assume worktree isolation is always active.
+- Startup commands from `.agents/shell.json` may run inside the active worktree session.
+- Skill indexing depends on embeddings and `.agents/skills-index.json`; `:index`/skill search may fail or go stale when embeddings are unavailable.
+- The AGENTS generator only succeeds if the sub-agent actually calls `create_agents_context`; plain assistant text is treated as failure.
 
 ## Change Policy
 
 - Do not invent new repo-level commands unless they are added to `package.json` or clearly supported by code/docs.
 - Preserve machine-managed files and conventions:
   - `.agents/PLAN.md` is scratch space and is excluded from upmerge.
-  - `.agents/shell.json` is managed as persisted shell approval/startup state.
+  - `.agents/shell.json` stores persisted shell approval/startup state.
   - `.agents/skills-index.json` is generated from local skills.
 - Prefer small, subsystem-local edits over broad refactors unless the change clearly spans multiple modules.
 - When editing tooling, keep the markdown contract and implementation synchronized.
+- Do not weaken workspace path-safety checks or bypass the tool approval/worktree flows without strong evidence and corresponding tests.
