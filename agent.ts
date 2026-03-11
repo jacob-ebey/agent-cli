@@ -15,6 +15,7 @@ import {
 } from "@opentui/core";
 
 import {
+  listAvailableModels,
   streamResponse,
   type Message,
   type ResponseChunk,
@@ -129,6 +130,13 @@ type UpmergeMenuItem = {
   path: string | null;
 };
 
+type ModelMenuItem = {
+  id: string;
+  label: string;
+  description: string;
+  provider: "shopify" | "ollama";
+};
+
 type PendingApproval = {
   toolName: string;
   approvalKey: string;
@@ -162,7 +170,7 @@ type InputHistoryState = {
 type HistoryMode = Exclude<Mode, "normal">;
 
 type ShellVisibility = "local" | "agent";
-type DetailPanel = "upmerge" | "history" | null;
+type DetailPanel = "upmerge" | "history" | "model" | null;
 
 type ShellExecutionResult = {
   stdout: string;
@@ -1331,6 +1339,12 @@ let upmergeSelection = 0;
 let historyMenuOpen = false;
 let historyItems: ConversationHistoryItem[] = [];
 let historySelection = 0;
+let modelMenuOpen = false;
+let modelMenuItems: ModelMenuItem[] = [];
+let filteredModelMenuItems: ModelMenuItem[] = [];
+let modelSelection = 0;
+let modelFilter = "";
+let modelMenuErrors: string[] = [];
 let detailPanelAttached: DetailPanel = null;
 let activeStreamAbortController: AbortController | null = null;
 let activeShellProcess: ChildProcess | null = null;
@@ -1772,6 +1786,40 @@ const historyPreviewText = new TextRenderable(renderer, {
 historyPreview.add(historyPreviewText);
 historyPanel.add(historyPreview);
 
+const modelPanel = new BoxRenderable(renderer, {
+  id: "model-panel",
+  width: 72,
+  border: true,
+  borderStyle: "rounded",
+  borderColor: "#f59e0b",
+  backgroundColor: "#1c1917",
+  title: "Model Picker",
+  padding: 1,
+});
+
+const modelPreview = new ScrollBoxRenderable(renderer, {
+  id: "model-preview",
+  width: "100%",
+  height: "100%",
+  stickyScroll: false,
+  viewportOptions: {
+    backgroundColor: "#1c1917",
+  },
+  contentOptions: {
+    flexDirection: "column",
+    backgroundColor: "#1c1917",
+  },
+});
+
+const modelPreviewText = new TextRenderable(renderer, {
+  id: "model-preview-text",
+  content: "Loading available models...",
+  fg: "#fde68a",
+});
+
+modelPreview.add(modelPreviewText);
+modelPanel.add(modelPreview);
+
 main.add(transcriptPanel);
 main.add(sidebar);
 
@@ -2019,10 +2067,18 @@ function attachDetailPanel(kind: Exclude<DetailPanel, null>) {
     main.remove(upmergePanel.id);
   } else if (detailPanelAttached === "history") {
     main.remove(historyPanel.id);
+  } else if (detailPanelAttached === "model") {
+    main.remove(modelPanel.id);
   }
 
   main.remove(sidebar.id);
-  main.add(kind === "upmerge" ? upmergePanel : historyPanel);
+  main.add(
+    kind === "upmerge"
+      ? upmergePanel
+      : kind === "history"
+        ? historyPanel
+        : modelPanel
+  );
   main.add(sidebar);
   detailPanelAttached = kind;
 }
@@ -2032,7 +2088,13 @@ function detachDetailPanel(kind: Exclude<DetailPanel, null>) {
     return;
   }
 
-  main.remove(kind === "upmerge" ? upmergePanel.id : historyPanel.id);
+  main.remove(
+    kind === "upmerge"
+      ? upmergePanel.id
+      : kind === "history"
+        ? historyPanel.id
+        : modelPanel.id
+  );
   detailPanelAttached = null;
 }
 
@@ -2049,7 +2111,8 @@ function closeUpmergeMenu() {
 }
 
 async function openUpmergeMenu() {
-  historyMenuOpen = false;
+  closeHistoryMenu();
+  closeModelMenu();
   upmergeMenuOpen = true;
   attachDetailPanel("upmerge");
   await refreshUpmergeState();
@@ -2150,6 +2213,7 @@ function closeHistoryMenu() {
 
 async function openHistoryMenu() {
   closeUpmergeMenu();
+  closeModelMenu();
   historyMenuOpen = true;
   attachDetailPanel("history");
   await refreshHistoryState();
@@ -2163,6 +2227,207 @@ async function moveHistorySelection(delta: number) {
   historySelection = (historySelection + delta + historyItems.length) % historyItems.length;
   await refreshHistoryPreview();
   updateSidebar();
+}
+
+function filterModelItems(items: ModelMenuItem[], filter: string) {
+  const query = filter.trim().toLowerCase();
+  if (!query) {
+    return items;
+  }
+
+  return items.filter((item) =>
+    [item.id, item.label, item.description, item.provider]
+      .join("\n")
+      .toLowerCase()
+      .includes(query)
+  );
+}
+
+function selectedModelItem() {
+  if (!filteredModelMenuItems.length) {
+    return null;
+  }
+
+  return filteredModelMenuItems[Math.min(modelSelection, filteredModelMenuItems.length - 1)] ?? null;
+}
+
+function activeModelViewportTop() {
+  return modelPreview.scrollTop;
+}
+
+function modelListHeight() {
+  return Math.max(1, modelPreview.viewport.height);
+}
+
+function ensureModelSelectionVisible() {
+  if (!filteredModelMenuItems.length) {
+    modelPreview.scrollTo({ x: 0, y: 0 });
+    return;
+  }
+
+  const headerLineCount = 4;
+  const selectedTop = headerLineCount + modelSelection * 2;
+  const selectedBottom = selectedTop + 1;
+  const viewportTop = activeModelViewportTop();
+  const viewportBottom = viewportTop + modelListHeight() - 1;
+
+  if (selectedTop < viewportTop) {
+    modelPreview.scrollTo({ x: 0, y: selectedTop });
+  } else if (selectedBottom > viewportBottom) {
+    modelPreview.scrollTo({
+      x: 0,
+      y: Math.max(0, selectedBottom - modelListHeight() + 1),
+    });
+  }
+}
+
+function updateModelMenuContent(note?: string) {
+  const selected = selectedModelItem();
+  const lines = [
+    `Current model: ${currentModel}`,
+    `Filter: ${modelFilter || "(none)"}`,
+    `Matches: ${filteredModelMenuItems.length}/${modelMenuItems.length}`,
+    "",
+    filteredModelMenuItems.length
+      ? filteredModelMenuItems
+          .map((item, index) => {
+            const prefix = index === modelSelection ? ">" : " ";
+            const current = item.id === currentModel ? " ✓" : "";
+            const meta = [item.provider, item.description].filter(Boolean).join(" • ");
+            return `${prefix} ${item.id}${current}${meta ? `\n    ${meta}` : ""}`;
+          })
+          .join("\n")
+      : "No models match the current filter.",
+    "",
+    "Shortcuts",
+    "j / k  change selection",
+    ".      filter/search",
+    "Enter  select model",
+    "Esc    close menu",
+    "",
+    modelMenuErrors.length
+      ? `Warnings:\n${modelMenuErrors.map((error) => `- ${error}`).join("\n")}`
+      : null,
+    note ?? (selected ? `Selected: ${selected.id}` : "Select a model."),
+  ].filter((line): line is string => line !== null);
+
+  modelPreviewText.content = lines.join("\n");
+  ensureModelSelectionVisible();
+  renderer.requestRender();
+}
+
+function refreshFilteredModelItems() {
+  filteredModelMenuItems = filterModelItems(modelMenuItems, modelFilter);
+  if (!filteredModelMenuItems.length) {
+    modelSelection = 0;
+  } else if (modelSelection >= filteredModelMenuItems.length) {
+    modelSelection = filteredModelMenuItems.length - 1;
+  }
+}
+
+function closeModelMenu() {
+  if (!modelMenuOpen) {
+    return;
+  }
+
+  modelMenuOpen = false;
+  detachDetailPanel("model");
+  updateSidebar();
+  updateComposerHint();
+  renderer.requestRender();
+}
+
+async function openModelMenu() {
+  closeUpmergeMenu();
+  closeHistoryMenu();
+  modelMenuOpen = true;
+  modelFilter = "";
+  modelSelection = 0;
+  modelMenuItems = [];
+  filteredModelMenuItems = [];
+  modelMenuErrors = [];
+  attachDetailPanel("model");
+  updateSidebar("Loading available models...");
+  updateModelMenuContent("Loading available models...");
+
+  try {
+    const result = await listAvailableModels();
+    modelMenuItems = result.models.map((model) => ({
+      id: model.id,
+      label: model.label,
+      description: model.description,
+      provider: model.provider,
+    }));
+    modelMenuErrors = result.errors;
+    refreshFilteredModelItems();
+    updateSidebar("Model picker ready.");
+    updateModelMenuContent();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    modelMenuErrors = [message];
+    updateSidebar("Failed to load models.");
+    updateModelMenuContent("Failed to load available models.");
+  }
+}
+
+function moveModelSelection(delta: number) {
+  if (!filteredModelMenuItems.length) {
+    return;
+  }
+
+  modelSelection =
+    (modelSelection + delta + filteredModelMenuItems.length) % filteredModelMenuItems.length;
+  updateSidebar();
+  updateModelMenuContent();
+}
+
+function backspaceModelFilter() {
+  if (!modelFilter.length) {
+    return;
+  }
+
+  modelFilter = modelFilter.slice(0, -1);
+  refreshFilteredModelItems();
+  updateSidebar();
+  updateModelMenuContent();
+}
+
+function appendModelFilter(text: string) {
+  if (!text) {
+    return;
+  }
+
+  modelFilter += text;
+  refreshFilteredModelItems();
+  updateSidebar();
+  updateModelMenuContent();
+}
+
+async function chooseSelectedModel() {
+  const selected = selectedModelItem();
+  if (!selected) {
+    updateSidebar("No model selected.");
+    updateModelMenuContent("No model selected.");
+    return;
+  }
+
+  currentModel = selected.id;
+  try {
+    await savePersistedConfig({ currentModel });
+    appendSystemMessage(
+      `Switched model to \`${currentModel}\`. Future sessions will reuse it.`
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    appendEntry(
+      "error",
+      `Switched model to \`${currentModel}\`, but failed to save it for future sessions.\n\n${message}`
+    );
+  }
+
+  closeModelMenu();
+  updateSidebar(`Using ${currentModel} for the next prompt.`);
+  await persistActiveConversation();
 }
 
 async function loadSelectedHistoryConversation() {
@@ -2211,6 +2476,7 @@ function setMode(nextMode: Mode) {
   if (nextMode !== "normal") {
     closeUpmergeMenu();
     closeHistoryMenu();
+    closeModelMenu();
   }
 
   mode = nextMode;
@@ -2466,7 +2732,7 @@ function updateSidebar(note = "Ready for your next prompt.") {
     ":clear reset conversation",
     ":history browse saved chats",
     ":index embed skill chunks",
-    ":model switch providers",
+    ":model open searchable model picker",
     ":quit  exit UI",
     "",
     upmergeNote,
@@ -2501,6 +2767,12 @@ function updateComposerHint() {
   if (historyMenuOpen) {
     composerHint.content =
       "History browser open. Enter loads the selected conversation, d deletes it, and Esc closes the browser.";
+    return;
+  }
+
+  if (modelMenuOpen) {
+    composerHint.content =
+      "Model picker open. Use j/k to move, . to filter, Enter to select, Backspace to edit the filter, and Esc to close.";
     return;
   }
 
@@ -2697,10 +2969,9 @@ async function executeCommand(raw: string) {
   }
 
   if (command === "model") {
-    appendSystemMessage(describeModelOptions());
     commandDraft = "";
     setMode("normal");
-    await persistActiveConversation();
+    await openModelMenu();
     return;
   }
 
@@ -3261,6 +3532,32 @@ function handleGlobalKey(key: KeyEvent) {
       void loadSelectedHistoryConversation();
     } else if (key.name === "d" || key.name === "delete") {
       void deleteSelectedHistoryConversation();
+    }
+    return;
+  }
+
+  if (modelMenuOpen) {
+    if (key.name === "escape") {
+      closeModelMenu();
+    } else if (key.name === "j" || key.name === "down") {
+      moveModelSelection(1);
+    } else if (key.name === "k" || key.name === "up") {
+      moveModelSelection(-1);
+    } else if (key.name === "enter" || key.name === "return") {
+      void chooseSelectedModel();
+    } else if (key.name === "backspace") {
+      backspaceModelFilter();
+    } else if (key.sequence === ".") {
+      updateSidebar("Search active. Type to filter the model list.");
+      updateModelMenuContent();
+    } else if (
+      key.sequence &&
+      !key.ctrl &&
+      !key.meta &&
+      key.name !== "tab" &&
+      key.name !== "escape"
+    ) {
+      appendModelFilter(key.sequence);
     }
     return;
   }

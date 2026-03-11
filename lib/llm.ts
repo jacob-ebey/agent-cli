@@ -77,6 +77,8 @@ const openAIKey = process.env.OPENAI_API_KEY;
 const ollamaBase = process.env.OLLAMA_API_BASE;
 const DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small";
 const DEFAULT_OLLAMA_BASE = "http://127.0.0.1:11434";
+const OPENAI_COMPATIBLE_MODELS_PATH = "/models";
+const OLLAMA_TAGS_PATH = "/api/tags";
 
 if (!openAIBase) {
   throw new Error("Missing OPENAI_API_BASE environment variable.");
@@ -118,6 +120,158 @@ function getChatModel(model: string) {
 
 export function getEmbeddingModelId() {
   return process.env.OPENAI_EMBEDDING_MODEL?.trim() || DEFAULT_EMBEDDING_MODEL;
+}
+
+type AvailableModel = {
+  id: string;
+  provider: "shopify" | "ollama";
+  label: string;
+  description: string;
+};
+
+function normalizeApiBaseURL(value: string) {
+  return value.replace(/\/+$/, "");
+}
+
+async function fetchOpenAICompatibleModels(options: {
+  baseURL: string;
+  headers?: Record<string, string>;
+  provider: AvailableModel["provider"];
+  prefix?: string;
+}) {
+  const response = await fetch(
+    `${normalizeApiBaseURL(options.baseURL)}${OPENAI_COMPATIBLE_MODELS_PATH}`,
+    {
+      headers: options.headers,
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `Model listing failed with ${response.status} ${response.statusText}`
+    );
+  }
+
+  const payload = (await response.json()) as {
+    data?: Array<{
+      id?: unknown;
+      owned_by?: unknown;
+      object?: unknown;
+    }>;
+  };
+
+  const models = Array.isArray(payload.data) ? payload.data : [];
+  return models
+    .map((entry) => {
+      const rawId = typeof entry.id === "string" ? entry.id.trim() : "";
+      if (!rawId) {
+        return null;
+      }
+
+      const id = options.prefix ? `${options.prefix}${rawId}` : rawId;
+      const owner = typeof entry.owned_by === "string" ? entry.owned_by : null;
+      const object = typeof entry.object === "string" ? entry.object : null;
+      return {
+        id,
+        provider: options.provider,
+        label: rawId,
+        description: [owner, object].filter(Boolean).join(" • "),
+      } satisfies AvailableModel;
+    })
+    .filter((model): model is AvailableModel => model !== null);
+}
+
+async function fetchOllamaModels(baseURL: string) {
+  const response = await fetch(
+    `${normalizeApiBaseURL(baseURL)}${OLLAMA_TAGS_PATH}`
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `Ollama model listing failed with ${response.status} ${response.statusText}`
+    );
+  }
+
+  const payload = (await response.json()) as {
+    models?: Array<{
+      name?: unknown;
+      model?: unknown;
+      details?: {
+        family?: unknown;
+        parameter_size?: unknown;
+        quantization_level?: unknown;
+      } | null;
+    }>;
+  };
+
+  const models = Array.isArray(payload.models) ? payload.models : [];
+  return models
+    .map((entry) => {
+      const rawId =
+        typeof entry.model === "string" && entry.model.trim()
+          ? entry.model.trim()
+          : typeof entry.name === "string" && entry.name.trim()
+            ? entry.name.trim()
+            : "";
+      if (!rawId) {
+        return null;
+      }
+
+      const details = entry.details ?? null;
+      const family = typeof details?.family === "string" ? details.family : null;
+      const parameterSize =
+        typeof details?.parameter_size === "string" ? details.parameter_size : null;
+      const quantization =
+        typeof details?.quantization_level === "string"
+          ? details.quantization_level
+          : null;
+
+      return {
+        id: `ollama:${rawId}`,
+        provider: "ollama",
+        label: rawId,
+        description: [family, parameterSize, quantization]
+          .filter(Boolean)
+          .join(" • "),
+      } satisfies AvailableModel;
+    })
+    .filter((model) => model !== null);
+}
+
+export async function listAvailableModels() {
+  const results = await Promise.allSettled([
+    fetchOpenAICompatibleModels({
+      baseURL: openAIBase ?? "",
+      headers: openAIKey
+        ? {
+            Authorization: `Bearer ${openAIKey}`,
+          }
+        : undefined,
+      provider: "shopify",
+    }),
+    fetchOllamaModels(ollamaBase?.trim() || DEFAULT_OLLAMA_BASE),
+  ]);
+
+  const models = results.flatMap((result) =>
+    result.status === "fulfilled" ? result.value : []
+  );
+  const errors = results.flatMap((result) =>
+    result.status === "rejected"
+      ? [result.reason instanceof Error ? result.reason.message : String(result.reason)]
+      : []
+  );
+
+  const deduped = new Map<string, AvailableModel>();
+  for (const model of models) {
+    deduped.set(model.id, model);
+  }
+
+  return {
+    models: [...deduped.values()].sort((left, right) =>
+      left.id.localeCompare(right.id)
+    ),
+    errors,
+  };
 }
 
 export async function embedValues(values: string[]) {
