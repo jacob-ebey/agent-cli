@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 
 import { INPUT_HISTORY_LIMIT, INPUT_HISTORY_PATH } from "./constants.ts";
-import type { InputHistoryState } from "./types.ts";
+import type { HistoryMode, InputHistoryState } from "./types.ts";
 
 export function emptyInputHistoryState(): InputHistoryState {
   return {
@@ -69,4 +69,92 @@ export async function saveInputHistory(history: InputHistoryState) {
     `${JSON.stringify(history, null, 2)}\n`,
     "utf-8"
   );
+}
+
+// agent_shell shares history with shell so commands run in either mode are
+// visible when navigating history in the other.
+export function historyKey(
+  currentMode: HistoryMode
+): Exclude<HistoryMode, "agent_shell"> {
+  return currentMode === "agent_shell" ? "shell" : currentMode;
+}
+
+export function resetHistoryCursor(options: {
+  currentMode: HistoryMode;
+  inputHistory: InputHistoryState;
+  historyCursor: Record<Exclude<HistoryMode, "agent_shell">, number>;
+  historyDrafts: Record<Exclude<HistoryMode, "agent_shell">, string>;
+}) {
+  const key = historyKey(options.currentMode);
+  options.historyCursor[key] = options.inputHistory[key].length;
+  options.historyDrafts[key] = "";
+}
+
+export function recordHistoryEntry(options: {
+  currentMode: HistoryMode;
+  rawValue: string;
+  inputHistory: InputHistoryState;
+  historyCursor: Record<Exclude<HistoryMode, "agent_shell">, number>;
+  historyDrafts: Record<Exclude<HistoryMode, "agent_shell">, string>;
+}) {
+  const value = options.rawValue.trim();
+  if (!value) {
+    resetHistoryCursor(options);
+    return false;
+  }
+
+  const key = historyKey(options.currentMode);
+  const entries = options.inputHistory[key].filter((entry) => entry !== value);
+  entries.push(value);
+  options.inputHistory[key] = entries.slice(-INPUT_HISTORY_LIMIT);
+  resetHistoryCursor(options);
+  return true;
+}
+
+export function syncHistoryDraft(options: {
+  currentMode: HistoryMode;
+  value: string;
+  inputHistory: InputHistoryState;
+  historyCursor: Record<Exclude<HistoryMode, "agent_shell">, number>;
+  historyDrafts: Record<Exclude<HistoryMode, "agent_shell">, string>;
+}) {
+  const key = historyKey(options.currentMode);
+  if (options.historyCursor[key] === options.inputHistory[key].length) {
+    options.historyDrafts[key] = options.value;
+  }
+}
+
+export function navigateHistory(options: {
+  currentMode: HistoryMode;
+  delta: -1 | 1;
+  inputHistory: InputHistoryState;
+  historyCursor: Record<Exclude<HistoryMode, "agent_shell">, number>;
+  historyDrafts: Record<Exclude<HistoryMode, "agent_shell">, string>;
+  currentDraftForMode: (currentMode: HistoryMode) => string;
+  setDraftForMode: (currentMode: HistoryMode, value: string) => void;
+}) {
+  const key = historyKey(options.currentMode);
+  const entries = options.inputHistory[key];
+  if (!entries.length) {
+    return null;
+  }
+
+  const nextCursor = Math.max(
+    0,
+    Math.min(entries.length, options.historyCursor[key] + options.delta)
+  );
+
+  if (nextCursor === options.historyCursor[key]) {
+    return null;
+  }
+
+  if (options.historyCursor[key] === entries.length) {
+    options.historyDrafts[key] = options.currentDraftForMode(options.currentMode);
+  }
+
+  options.historyCursor[key] = nextCursor;
+  const nextValue =
+    nextCursor === entries.length ? options.historyDrafts[key] : entries[nextCursor] ?? "";
+  options.setDraftForMode(options.currentMode, nextValue);
+  return nextValue;
 }

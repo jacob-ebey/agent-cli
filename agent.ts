@@ -83,7 +83,13 @@ import {
   savePersistedConversationState,
   summarizeConversationTitleFromTranscript,
 } from "./lib/agent/conversation-store.ts";
-import { loadInputHistory, saveInputHistory } from "./lib/agent/input-history.ts";
+import {
+  loadInputHistory,
+  navigateHistory,
+  recordHistoryEntry,
+  saveInputHistory,
+  syncHistoryDraft,
+} from "./lib/agent/input-history.ts";
 import {
   clearApprovalQueueState,
   currentApprovalPrompt,
@@ -694,64 +700,35 @@ async function persistInputHistory() {
   }
 }
 
-// agent_shell shares history with shell so commands run in either mode are
-// visible when navigating history in the other.
-function historyKey(currentMode: HistoryMode): Exclude<HistoryMode, "agent_shell"> {
-  return currentMode === "agent_shell" ? "shell" : currentMode;
-}
+async function recordAndPersistHistoryEntry(currentMode: HistoryMode, rawValue: string) {
+  const changed = recordHistoryEntry({
+    currentMode,
+    rawValue,
+    inputHistory,
+    historyCursor,
+    historyDrafts,
+  });
 
-function resetHistoryCursor(currentMode: HistoryMode) {
-  const key = historyKey(currentMode);
-  historyCursor[key] = inputHistory[key].length;
-  historyDrafts[key] = "";
-}
-
-async function recordHistoryEntry(currentMode: HistoryMode, rawValue: string) {
-  const value = rawValue.trim();
-  if (!value) {
-    resetHistoryCursor(currentMode);
-    return;
-  }
-
-  const key = historyKey(currentMode);
-  const entries = inputHistory[key].filter((entry) => entry !== value);
-  entries.push(value);
-  inputHistory[key] = entries.slice(-INPUT_HISTORY_LIMIT);
-  resetHistoryCursor(currentMode);
-  await persistInputHistory();
-}
-
-function syncHistoryDraft(currentMode: HistoryMode, value: string) {
-  const key = historyKey(currentMode);
-  if (historyCursor[key] === inputHistory[key].length) {
-    historyDrafts[key] = value;
+  if (changed) {
+    await persistInputHistory();
   }
 }
 
-function navigateHistory(currentMode: HistoryMode, delta: -1 | 1) {
-  const key = historyKey(currentMode);
-  const entries = inputHistory[key];
-  if (!entries.length) {
+function navigateHistoryInComposer(currentMode: HistoryMode, delta: -1 | 1) {
+  const nextValue = navigateHistory({
+    currentMode,
+    delta,
+    inputHistory,
+    historyCursor,
+    historyDrafts,
+    currentDraftForMode,
+    setDraftForMode,
+  });
+
+  if (nextValue === null) {
     return false;
   }
 
-  const nextCursor = Math.max(
-    0,
-    Math.min(entries.length, historyCursor[key] + delta)
-  );
-
-  if (nextCursor === historyCursor[key]) {
-    return false;
-  }
-
-  if (historyCursor[key] === entries.length) {
-    historyDrafts[key] = currentDraftForMode(currentMode);
-  }
-
-  historyCursor[key] = nextCursor;
-  const nextValue =
-    nextCursor === entries.length ? historyDrafts[key] : entries[nextCursor] ?? "";
-  setDraftForMode(currentMode, nextValue);
   setComposerText(nextValue);
   moveComposerCursorToEnd(nextValue);
   updateComposerHint();
@@ -1952,14 +1929,14 @@ async function submitPrompt() {
   if (busy) return;
 
   if (mode === "command") {
-    await recordHistoryEntry("command", commandDraft);
+    await recordAndPersistHistoryEntry("command", commandDraft);
     await executeCommand(commandDraft);
     return;
   }
 
   if (mode === "shell") {
     const command = shellDraft.trim();
-    await recordHistoryEntry("shell", shellDraft);
+    await recordAndPersistHistoryEntry("shell", shellDraft);
     shellDraft = "";
     input.setText("");
     setMode("normal");
@@ -1969,7 +1946,7 @@ async function submitPrompt() {
 
   if (mode === "agent_shell") {
     const command = agentShellDraft.trim();
-    await recordHistoryEntry("agent_shell", agentShellDraft);
+    await recordAndPersistHistoryEntry("agent_shell", agentShellDraft);
     agentShellDraft = "";
     input.setText("");
     setMode("normal");
@@ -1984,7 +1961,7 @@ async function submitPrompt() {
   const content = insertDraft.trim();
   if (!content) return;
 
-  await recordHistoryEntry("insert", insertDraft);
+  await recordAndPersistHistoryEntry("insert", insertDraft);
 
   appendEntry("user", content);
   pushConversationMessage({
@@ -2267,7 +2244,7 @@ function handleGlobalKey(key: KeyEvent) {
     const historyMode = modeToHistoryMode(mode);
 
     if (historyMode && (key.name === "up" || key.name === "down")) {
-      if (navigateHistory(historyMode, key.name === "up" ? -1 : 1)) {
+      if (navigateHistoryInComposer(historyMode, key.name === "up" ? -1 : 1)) {
         return;
       }
     }
@@ -2347,16 +2324,40 @@ input.onContentChange = () => {
 
   if (mode === "command") {
     commandDraft = value;
-    syncHistoryDraft("command", value);
+    syncHistoryDraft({
+      currentMode: "command",
+      value,
+      inputHistory,
+      historyCursor,
+      historyDrafts,
+    });
   } else if (mode === "shell") {
     shellDraft = value;
-    syncHistoryDraft("shell", value);
+    syncHistoryDraft({
+      currentMode: "shell",
+      value,
+      inputHistory,
+      historyCursor,
+      historyDrafts,
+    });
   } else if (mode === "agent_shell") {
     agentShellDraft = value;
-    syncHistoryDraft("agent_shell", value);
+    syncHistoryDraft({
+      currentMode: "agent_shell",
+      value,
+      inputHistory,
+      historyCursor,
+      historyDrafts,
+    });
   } else {
     insertDraft = value;
-    syncHistoryDraft("insert", value);
+    syncHistoryDraft({
+      currentMode: "insert",
+      value,
+      inputHistory,
+      historyCursor,
+      historyDrafts,
+    });
   }
   updateComposerHint();
 };
