@@ -4,6 +4,7 @@ import * as path from "node:path";
 import {
   getActiveWorkspaceRoot,
   getOriginalWorkspaceRoot,
+  prepareWorkspaceForEdit,
 } from "../worktree.ts";
 
 export const WORKSPACE_ROOT = getOriginalWorkspaceRoot();
@@ -11,6 +12,8 @@ export const WORKSPACE_ROOT = getOriginalWorkspaceRoot();
 export function getWorkspaceRoot() {
   return getActiveWorkspaceRoot();
 }
+
+export { prepareWorkspaceForEdit };
 
 export type ToolHandler = (argumentsObject: Record<string, unknown>) => Promise<string>;
 

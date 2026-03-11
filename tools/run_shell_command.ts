@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import {
   assertInteger,
   getWorkspaceRoot,
+  prepareWorkspaceForEdit,
   relativeWorkspacePath,
   resolveWorkspacePath,
   type ToolHandler,
@@ -123,6 +124,7 @@ export const execute: ToolHandler = async (argumentsObject) => {
     "timeout_ms",
     DEFAULT_TIMEOUT_MS
   );
+  await prepareWorkspaceForEdit();
   const resolvedCwd = requestedCwd
     ? resolveWorkspacePath(requestedCwd)
     : getWorkspaceRoot();

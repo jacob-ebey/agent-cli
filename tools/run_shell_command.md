@@ -2,7 +2,7 @@
 
 ## Description
 
-Run an arbitrary shell command inside the workspace and return its stdout, stderr, exit code, and timeout status.
+Run an arbitrary shell command inside the agent worktree and return its stdout, stderr, exit code, and timeout status.
 
 ## Parameters
 
@@ -16,7 +16,7 @@ Run an arbitrary shell command inside the workspace and return its stdout, stder
     },
     "cwd": {
       "type": "string",
-      "description": "Optional relative or absolute workspace path to run the command from. Defaults to the workspace root."
+      "description": "Optional relative or absolute worktree path to run the command from. Defaults to the worktree root for the current workspace."
     },
     "timeout_ms": {
       "type": "integer",
@@ -43,5 +43,6 @@ Run an arbitrary shell command inside the workspace and return its stdout, stder
 - Every command requires user approval before it runs.
 - Users can approve a command once or always.
 - Always-approved commands are stored in `.agents/shell.json` using the exact command string.
-- `cwd` must stay within the workspace.
+- Commands always run from the agent-managed worktree when one is available for the current git workspace.
+- `cwd` must stay within the current worktree workspace root.
 - Commands run through the user's shell when available, or a platform fallback shell otherwise.
