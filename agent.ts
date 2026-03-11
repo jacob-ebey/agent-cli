@@ -79,6 +79,9 @@ const CONVERSATION_WORKTREES_DIRECTORY = path.join(
   "worktrees"
 );
 const SHELL_APPROVALS_PATH = path.join(WORKSPACE_ROOT, ".agents", "shell.json");
+const PLAN_PATH = path.join(WORKSPACE_ROOT, ".agents", "PLAN.md");
+const GITIGNORE_PATH = path.join(WORKSPACE_ROOT, ".gitignore");
+const PLAN_GITIGNORE_ENTRY = ".agents/PLAN.md";
 const INPUT_HISTORY_PATH = path.join(tmpdir(), "agent-cli-input-history.json");
 const INPUT_HISTORY_LIMIT = 100;
 const LAUNCH_ARGUMENTS = new Set(process.argv.slice(2));
@@ -697,6 +700,47 @@ async function savePersistedShellApprovals(approvedCommands: Set<string>) {
   );
 }
 
+async function ensurePlanFileReady() {
+  await fs.mkdir(path.dirname(PLAN_PATH), { recursive: true });
+
+  try {
+    await fs.access(PLAN_PATH);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+
+    await fs.writeFile(PLAN_PATH, "", "utf-8");
+  }
+
+  let gitignoreSource = "";
+
+  try {
+    gitignoreSource = await fs.readFile(GITIGNORE_PATH, "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  const existingEntries = new Set(
+    gitignoreSource
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+  );
+
+  if (existingEntries.has(PLAN_GITIGNORE_ENTRY)) {
+    return;
+  }
+
+  const nextSource = gitignoreSource.trimEnd()
+    ? `${gitignoreSource.trimEnd()}\n${PLAN_GITIGNORE_ENTRY}\n`
+    : `${PLAN_GITIGNORE_ENTRY}\n`;
+
+  await fs.writeFile(GITIGNORE_PATH, nextSource, "utf-8");
+}
+
 async function loadRootAgentsGuidance() {
   try {
     const source = await fs.readFile(ROOT_AGENTS_PATH, "utf-8");
@@ -726,8 +770,6 @@ async function loadInitialSystemMessage() {
     fs.readFile(SYSTEM_PROMPT_PATH, "utf-8"),
     loadRootAgentsGuidance(),
   ]);
-
-  await fs.writeFile("DEBUG.txt", rootAgentsGuidance ?? "");
 
   return [
     baseSystemPrompt,
@@ -1202,6 +1244,8 @@ async function ensureToolApproval(
     );
   }
 }
+
+await ensurePlanFileReady();
 
 const [initialSystemMessage, loadedTools] = await Promise.all([
   loadInitialSystemMessage(),
