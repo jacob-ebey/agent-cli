@@ -67,6 +67,15 @@ import {
   readStringArgument,
 } from "./lib/agent/utils.ts";
 import {
+  buildModelMenuContent,
+  computeModelViewportTop,
+  filterModelItems,
+  moveModelSelection as moveModelSelectionIndex,
+  normalizeModelSelection,
+  resolveModelCommand,
+  selectedModelItem as getSelectedModelItem,
+} from "./lib/agent/model-menu.ts";
+import {
   ensurePlanFileReady,
   loadInitialSystemMessage,
   loadPersistedConfig,
@@ -609,19 +618,6 @@ function formatShellMessage({
     .join("\n");
 }
 
-function resolveModelCommand(input: string) {
-  const value = input.trim();
-  if (!value) {
-    return null;
-  }
-
-  if (value in MODEL_PRESETS) {
-    return MODEL_PRESETS[value as ModelPresetName];
-  }
-
-  return value || null;
-}
-
 const {
   app,
   main,
@@ -984,100 +980,44 @@ async function moveHistorySelection(delta: number) {
   updateSidebar();
 }
 
-function filterModelItems(items: ModelMenuItem[], filter: string) {
-  const query = filter.trim().toLowerCase();
-  if (!query) {
-    return items;
-  }
-
-  return items.filter((item) =>
-    [item.id, item.label, item.description, item.provider]
-      .join("\n")
-      .toLowerCase()
-      .includes(query)
-  );
-}
-
 function selectedModelItem() {
-  if (!filteredModelMenuItems.length) {
-    return null;
-  }
-
-  return filteredModelMenuItems[Math.min(modelSelection, filteredModelMenuItems.length - 1)] ?? null;
-}
-
-function activeModelViewportTop() {
-  return modelPreview.scrollTop;
-}
-
-function modelListHeight() {
-  return Math.max(1, modelPreview.viewport.height);
+  return getSelectedModelItem({
+    filteredItems: filteredModelMenuItems,
+    modelSelection,
+  });
 }
 
 function ensureModelSelectionVisible() {
-  if (!filteredModelMenuItems.length) {
-    modelPreview.scrollTo({ x: 0, y: 0 });
-    return;
-  }
+  const nextTop = computeModelViewportTop({
+    currentScrollTop: modelPreview.scrollTop,
+    viewportHeight: modelPreview.viewport.height,
+    modelSelection,
+    filteredItems: filteredModelMenuItems,
+  });
 
-  const headerLineCount = 4;
-  const selectedTop = headerLineCount + modelSelection * 2;
-  const selectedBottom = selectedTop + 1;
-  const viewportTop = activeModelViewportTop();
-  const viewportBottom = viewportTop + modelListHeight() - 1;
-
-  if (selectedTop < viewportTop) {
-    modelPreview.scrollTo({ x: 0, y: selectedTop });
-  } else if (selectedBottom > viewportBottom) {
-    modelPreview.scrollTo({
-      x: 0,
-      y: Math.max(0, selectedBottom - modelListHeight() + 1),
-    });
-  }
+  modelPreview.scrollTo({ x: 0, y: nextTop });
 }
 
 function updateModelMenuContent(note?: string) {
-  const selected = selectedModelItem();
-  const lines = [
-    `Current model: ${currentModel}`,
-    `Filter: ${modelFilter || "(none)"}`,
-    `Matches: ${filteredModelMenuItems.length}/${modelMenuItems.length}`,
-    "",
-    filteredModelMenuItems.length
-      ? filteredModelMenuItems
-          .map((item, index) => {
-            const prefix = index === modelSelection ? ">" : " ";
-            const current = item.id === currentModel ? " ✓" : "";
-            const meta = [item.provider, item.description].filter(Boolean).join(" • ");
-            return `${prefix} ${item.id}${current}${meta ? `\n    ${meta}` : ""}`;
-          })
-          .join("\n")
-      : "No models match the current filter.",
-    "",
-    "Shortcuts",
-    "j / k  change selection",
-    ".      filter/search",
-    "Enter  select model",
-    "Esc    close menu",
-    "",
-    modelMenuErrors.length
-      ? `Warnings:\n${modelMenuErrors.map((error) => `- ${error}`).join("\n")}`
-      : null,
-    note ?? (selected ? `Selected: ${selected.id}` : "Select a model."),
-  ].filter((line): line is string => line !== null);
-
-  modelPreviewText.content = lines.join("\n");
+  modelPreviewText.content = buildModelMenuContent({
+    currentModel,
+    modelFilter,
+    filteredItems: filteredModelMenuItems,
+    allItems: modelMenuItems,
+    modelSelection,
+    modelMenuErrors,
+    note,
+  }).join("\n");
   ensureModelSelectionVisible();
   renderer.requestRender();
 }
 
 function refreshFilteredModelItems() {
   filteredModelMenuItems = filterModelItems(modelMenuItems, modelFilter);
-  if (!filteredModelMenuItems.length) {
-    modelSelection = 0;
-  } else if (modelSelection >= filteredModelMenuItems.length) {
-    modelSelection = filteredModelMenuItems.length - 1;
-  }
+  modelSelection = normalizeModelSelection({
+    filteredItems: filteredModelMenuItems,
+    modelSelection,
+  });
 }
 
 function closeModelMenu() {
@@ -1130,8 +1070,11 @@ function moveModelSelection(delta: number) {
     return;
   }
 
-  modelSelection =
-    (modelSelection + delta + filteredModelMenuItems.length) % filteredModelMenuItems.length;
+  modelSelection = moveModelSelectionIndex({
+    filteredItems: filteredModelMenuItems,
+    modelSelection,
+    delta,
+  });
   updateSidebar();
   updateModelMenuContent();
 }
@@ -1690,7 +1633,10 @@ async function executeCommand(raw: string) {
   }
 
   if (command.startsWith("model ")) {
-    const requestedModel = resolveModelCommand(command.slice("model".length));
+    const requestedModel = resolveModelCommand({
+      input: command.slice("model".length),
+      presets: MODEL_PRESETS,
+    });
 
     if (!requestedModel) {
       appendEntry(
