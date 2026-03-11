@@ -147,6 +147,7 @@ import {
   resolveRequestedModel,
   runAgentsMdCommand,
   runIndexCommand as runIndexCommandFlow,
+  runMergeWorktreeCommand,
   showPlanCommand,
   summarizeConversationCommand,
 } from "./lib/agent/commands.ts";
@@ -1266,6 +1267,21 @@ async function runPlanCommand() {
   scrollToBottom(true);
 }
 
+async function runMergeCommand(argument: string) {
+  await runMergeWorktreeCommand({
+    argument,
+    setCommandDraft: (value) => {
+      commandDraft = value;
+    },
+    setModeNormal: () => setMode("normal"),
+    appendSystemMessage,
+    appendEntry: (role, content) => appendEntry(role, content),
+    updateSidebar,
+  });
+  renderer.requestRender();
+  scrollToBottom(true);
+}
+
 async function runWorktreeCommand() {
   await copyWorktreePathCommand({
     worktreePath: getActiveWorkspaceAbsolutePath(),
@@ -1335,6 +1351,16 @@ async function executeCommand(raw: string) {
 
   if (command === "plan") {
     await runPlanCommand();
+    return;
+  }
+
+  if (command === "merge") {
+    await runMergeCommand("");
+    return;
+  }
+
+  if (command.startsWith("merge ")) {
+    await runMergeCommand(command.slice("merge".length));
     return;
   }
 

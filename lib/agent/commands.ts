@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { generateTextResponse, streamResponse, type Message, type Tool } from "../llm.ts";
 import { indexSkills } from "../skills-index.ts";
 import { MODEL_PRESETS, ROOT_AGENTS_PATH, WORKSPACE_ROOT } from "./constants.ts";
-import { getActiveWorkspaceRoot } from "../../worktree.ts";
+import { getActiveWorkspaceRoot, mergeSourceIntoWorktree } from "../../worktree.ts";
 import { buildConversationSummaryPrompt, createSummarizedConversationState, hasMeaningfulTranscript } from "./summarize.ts";
 import { resolveModelCommand } from "./model-menu.ts";
 import { appendChunkWithLimit, extractAssistantText } from "./utils.ts";
@@ -23,6 +23,8 @@ export function describeHelpOptions(currentModel: string) {
     ":model      open the searchable model picker",
     ":model ...  switch to a preset or explicit model id",
     ":plan       show the current .agents/PLAN.md",
+    ":merge      merge the source branch or ref into the active worktree",
+    ":merge ...  merge an explicit git ref, or remote plus branch, into the active worktree",
     ":summarize  compress the current chat history",
     ":worktree   copy the active absolute workspace/worktree path",
     ":quit       exit the UI",
@@ -475,6 +477,56 @@ export async function copyWorktreePathCommand(options: {
       `Failed to copy the active workspace path to the clipboard.\n\nPath:\n\`${options.worktreePath}\`\n\n${message}`
     );
     options.updateSidebar("Failed to copy active workspace path to clipboard.");
+  }
+}
+
+export async function runMergeWorktreeCommand(options: {
+  argument: string;
+  setCommandDraft: (value: string) => void;
+  setModeNormal: () => void;
+  appendSystemMessage: (content: string) => void;
+  appendEntry: (role: "error", content: string) => void;
+  updateSidebar: (note: string) => void;
+}) {
+  options.setCommandDraft("");
+  options.setModeNormal();
+
+  const trimmed = options.argument.trim();
+  const tokens = trimmed ? trimmed.split(/\s+/).filter(Boolean) : [];
+
+  const mergeOptions =
+    tokens.length === 0
+      ? undefined
+      : tokens.length === 1
+        ? { sourceRef: tokens[0] }
+        : tokens.length === 2
+          ? { remote: tokens[0], branch: tokens[1] }
+          : null;
+
+  if (mergeOptions === null) {
+    options.appendEntry(
+      "error",
+      [
+        "Invalid merge arguments.",
+        "",
+        "Usage:",
+        "- :merge",
+        "- :merge origin/main",
+        "- :merge origin main",
+      ].join("\n")
+    );
+    options.updateSidebar("Invalid merge arguments.");
+    return;
+  }
+
+  try {
+    const message = await mergeSourceIntoWorktree(mergeOptions);
+    options.appendSystemMessage(message);
+    options.updateSidebar("Merged source changes into the active worktree.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    options.appendEntry("error", `Worktree merge failed.\n\n${message}`);
+    options.updateSidebar("Worktree merge failed.");
   }
 }
 

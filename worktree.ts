@@ -106,6 +106,11 @@ export type WorkspaceSessionManager = {
   relativeOriginalWorkspacePath: (targetPath: string) => string;
   prepareWorkspaceForEdit: () => Promise<SessionState>;
   trackEditTarget: (targetPath: string) => Promise<{ mode: "direct" | "worktree"; relativePath: string }>;
+  mergeSourceIntoWorktree: (options?: {
+    sourceRef?: string;
+    remote?: string;
+    branch?: string;
+  }) => Promise<string>;
   getUpmergeStatus: () => Promise<UpmergeStatus>;
   getUpmergePreview: (relativePath?: string) => Promise<string>;
   upmergeRelativePath: (relativePath: string) => Promise<string>;
@@ -778,6 +783,104 @@ async function trackEditTarget(targetPath: string) {
   };
 }
 
+async function mergeSourceIntoWorktree(options?: {
+  sourceRef?: string;
+  remote?: string;
+  branch?: string;
+}) {
+  const session = await ensureSession();
+  if (session.mode !== "worktree") {
+    return session.note;
+  }
+
+  const sourceRef =
+    typeof options?.sourceRef === "string" && options.sourceRef.trim()
+      ? options.sourceRef.trim()
+      : null;
+  const remote =
+    typeof options?.remote === "string" && options.remote.trim()
+      ? options.remote.trim()
+      : null;
+  const branch =
+    typeof options?.branch === "string" && options.branch.trim()
+      ? options.branch.trim()
+      : null;
+
+  let resolvedSource = sourceRef;
+  if (!resolvedSource && remote && branch) {
+    resolvedSource = `${remote}/${branch}`;
+  } else if (!resolvedSource && branch) {
+    resolvedSource = branch;
+  }
+
+  if (!resolvedSource) {
+    const branchResult = await runCommand(
+      "git",
+      ["rev-parse", "--abbrev-ref", "HEAD"],
+      ORIGINAL_WORKSPACE_ROOT
+    );
+    if (branchResult.exitCode !== 0) {
+      throw new Error(
+        branchResult.stderr.trim() || "Failed to determine the current source branch."
+      );
+    }
+
+    const currentBranch = branchResult.stdout.trim();
+    resolvedSource = currentBranch === "HEAD" ? "HEAD" : `origin/${currentBranch}`;
+  }
+
+  const mergeResult = await runCommand(
+    "git",
+    ["merge", "--no-edit", "--no-ff", resolvedSource],
+    session.worktreeRoot
+  );
+
+  const summaryLines = [
+    `Merged source ref \`${resolvedSource}\` into the agent worktree.`,
+  ];
+
+  const stdout = mergeResult.stdout.trim();
+  const stderr = mergeResult.stderr.trim();
+
+  if (mergeResult.exitCode === 0) {
+    if (stdout) {
+      summaryLines.push("", "Stdout:", stdout);
+    }
+    if (stderr) {
+      summaryLines.push("", "Stderr:", stderr);
+    }
+    return summaryLines.join("\n");
+  }
+
+  const statusResult = await runCommand("git", ["status", "--short"], session.worktreeRoot);
+  const statusOutput = statusResult.stdout.trim();
+  const hasConflicts = statusOutput
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .some((line) => line.startsWith("UU ") || line.startsWith("AA ") || line.startsWith("DD ") || line.startsWith("AU ") || line.startsWith("UA ") || line.startsWith("DU ") || line.startsWith("UD "));
+
+  if (hasConflicts) {
+    const lines = [
+      `Merge conflict while merging \`${resolvedSource}\` into the agent worktree.`,
+    ];
+    if (stdout) {
+      lines.push("", "Stdout:", stdout);
+    }
+    if (stderr) {
+      lines.push("", "Stderr:", stderr);
+    }
+    if (statusOutput) {
+      lines.push("", "git status --short:", statusOutput);
+    }
+    return lines.join("\n");
+  }
+
+  throw new Error(
+    stderr || stdout || `Failed to merge ${resolvedSource} into the agent worktree.`
+  );
+}
+
 async function getUpmergeStatus(): Promise<UpmergeStatus> {
   if (sessionState.mode === "worktree") {
     const pendingFiles: string[] = [];
@@ -1113,6 +1216,7 @@ async function cleanupWorkspaceSession(
     relativeOriginalWorkspacePath,
     prepareWorkspaceForEdit,
     trackEditTarget,
+    mergeSourceIntoWorktree,
     getUpmergeStatus,
     getUpmergePreview,
     upmergeRelativePath,
@@ -1136,6 +1240,7 @@ export const {
   relativeOriginalWorkspacePath,
   prepareWorkspaceForEdit,
   trackEditTarget,
+  mergeSourceIntoWorktree,
   getUpmergeStatus,
   getUpmergePreview,
   upmergeRelativePath,
