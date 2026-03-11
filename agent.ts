@@ -290,7 +290,7 @@ let activeStreamAbortController: AbortController | null = null;
 let activeShellProcess: ChildProcess | null = null;
 let activeThinkingIndicator: NodeJS.Timeout | null = null;
 let thinkingFrameIndex = 0;
-let latestSidebarNote = "Ready for your next prompt.";
+let latestSidebarNote = "Idle.";
 const approvedEditTargets = new Set<string>();
 let activeApproval: PendingApproval | null = null;
 const queuedApprovals: PendingApproval[] = [];
@@ -1064,7 +1064,11 @@ function buildSidebarPresentationState(): SidebarPresentationState {
   };
 }
 
-function updateSidebar(note = "Ready for your next prompt.") {
+function defaultSidebarNote() {
+  return streamPhase === "idle" ? "Ready for your next prompt." : `Status: ${streamPhase}.`;
+}
+
+function updateSidebar(note = defaultSidebarNote()) {
   latestSidebarNote = note;
   const sidebarViewModel = createSidebarViewModel(
     buildSidebarPresentationState(),
@@ -1584,11 +1588,7 @@ async function runAgentLoop() {
   } finally {
     setBusy(false);
     updateComposerHint();
-    updateSidebar(
-      streamAborted
-        ? "Stream aborted. Ready for your next prompt."
-        : "Ready for your next prompt."
-    );
+    updateSidebar(streamAborted ? "Stream aborted." : undefined);
     renderer.requestRender();
     scrollToBottom();
   }
