@@ -4,7 +4,6 @@ import * as path from "node:path";
 import {
   getActiveWorkspaceRoot,
   getOriginalWorkspaceRoot,
-  mergeSourceIntoWorktree,
   prepareWorkspaceForEdit,
 } from "../worktree.ts";
 
@@ -14,7 +13,7 @@ export function getWorkspaceRoot() {
   return getActiveWorkspaceRoot();
 }
 
-export { mergeSourceIntoWorktree, prepareWorkspaceForEdit };
+export { prepareWorkspaceForEdit };
 
 export type ToolHandler = (argumentsObject: Record<string, unknown>) => Promise<string>;
 
