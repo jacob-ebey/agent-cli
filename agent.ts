@@ -958,7 +958,7 @@ function summarizeToolResult(
         .filter(Boolean)
         .join("\n");
     }
-    case "search_files": {
+    case "ripgrep": {
       const pattern = readStringArgument(argumentsObject, "pattern");
       const requestedPath = readStringArgument(argumentsObject, "path") ?? ".";
       const glob = readStringArgument(argumentsObject, "glob");

@@ -1,4 +1,4 @@
-# `search_files`
+# `ripgrep`
 
 ## Description
 
