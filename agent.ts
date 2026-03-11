@@ -1,3 +1,4 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs/promises";
 import { homedir } from "node:os";
 import * as path from "node:path";
@@ -54,7 +55,7 @@ const CONFIG_PATH = path.join(CONFIG_DIRECTORY, "config.json");
 const SHELL_APPROVALS_PATH = path.join(WORKSPACE_ROOT, ".agents", "shell.json");
 
 type ChatRole = "assistant" | "user" | "system" | "error";
-type Mode = "normal" | "insert" | "command";
+type Mode = "normal" | "insert" | "command" | "shell" | "agent_shell";
 
 type ChatEntry = {
   id: string;
@@ -111,8 +112,44 @@ type PersistedShellApprovals = {
   approvedCommands: string[];
 };
 
+type ShellVisibility = "local" | "agent";
+
+type ShellExecutionResult = {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  startupError: string | null;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+};
+
+const SHELL_OUTPUT_CHAR_LIMIT = 64_000;
+
 function normalizeWhitespace(value: string) {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function appendChunkWithLimit(current: string, chunk: string) {
+  if (current.length >= SHELL_OUTPUT_CHAR_LIMIT) {
+    return {
+      value: current,
+      truncated: true,
+    };
+  }
+
+  const remaining = SHELL_OUTPUT_CHAR_LIMIT - current.length;
+  if (chunk.length <= remaining) {
+    return {
+      value: current + chunk,
+      truncated: false,
+    };
+  }
+
+  return {
+    value: current + chunk.slice(0, remaining),
+    truncated: true,
+  };
 }
 
 function parsePersistedModel(value: unknown) {
@@ -633,6 +670,8 @@ let busy = false;
 let mode: Mode = "normal";
 let insertDraft = "";
 let commandDraft = "";
+let shellDraft = "";
+let agentShellDraft = "";
 const entries: ChatEntry[] = [];
 let upmergeMode: "direct" | "worktree" = "direct";
 let upmergeNote =
@@ -642,6 +681,7 @@ let upmergeMenuOpen = false;
 let upmergeSelection = 0;
 let upmergePanelAttached = false;
 let activeStreamAbortController: AbortController | null = null;
+let activeShellProcess: ChildProcess | null = null;
 const approvedEditTargets = new Set<string>();
 let activeApproval: PendingApproval | null = null;
 const queuedApprovals: PendingApproval[] = [];
@@ -775,6 +815,67 @@ function describeModelOptions() {
     "",
     "You can also run `:model your-model-id` to set any Shopify gateway model directly.",
   ].join("\n");
+}
+
+function formatShellMessage({
+  command,
+  cwdLabel,
+  stdout,
+  stderr,
+  exitCode,
+  signal,
+  startupError,
+  stdoutTruncated,
+  stderrTruncated,
+  running,
+  visibility,
+}: {
+  command: string;
+  cwdLabel: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  startupError: string | null;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+  running: boolean;
+  visibility: ShellVisibility;
+}) {
+  const summaryLine = running
+    ? "Status: running"
+    : startupError
+      ? "Status: failed to start"
+      : signal
+        ? `Status: terminated by ${signal}`
+        : `Status: exited with code ${exitCode ?? 0}`;
+  const visibilityLine =
+    visibility === "agent"
+      ? "Visibility: shared with the agent in conversation history"
+      : "Visibility: local only; hidden from the agent";
+
+  return [
+    "Shell command",
+    command,
+    "",
+    `Cwd: ${cwdLabel}`,
+    visibilityLine,
+    summaryLine,
+    !running && !startupError && signal === null
+      ? `Exit code: ${exitCode ?? 0}`
+      : null,
+    startupError ? `Startup error: ${startupError}` : null,
+    "",
+    "Stdout:",
+    stdout.length ? stdout : "(empty)",
+    stdoutTruncated ? "\n[stdout truncated]\n" : null,
+    "",
+    "Stderr:",
+    stderr.length ? stderr : "(empty)",
+    stderrTruncated ? "\n[stderr truncated]\n" : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join("\n");
 }
 
 function resolveModelCommand(input: string) {
@@ -1150,10 +1251,36 @@ function setMode(nextMode: Mode) {
         renderer.requestRender();
       }
     });
+  } else if (mode === "shell") {
+    composer.title = "-- SHELL --";
+    composer.borderColor = "#14b8a6";
+    input.placeholder = "Type a shell command. Enter runs it locally";
+    setComposerText(shellDraft);
+    process.nextTick(() => {
+      if (mode === "shell") {
+        input.focus();
+        moveComposerCursorToEnd(shellDraft);
+        renderer.requestRender();
+      }
+    });
+  } else if (mode === "agent_shell") {
+    composer.title = "-- AGENT SHELL --";
+    composer.borderColor = "#8b5cf6";
+    input.placeholder =
+      "Type a shell command. Enter runs it and shares output with the agent";
+    setComposerText(agentShellDraft);
+    process.nextTick(() => {
+      if (mode === "agent_shell") {
+        input.focus();
+        moveComposerCursorToEnd(agentShellDraft);
+        renderer.requestRender();
+      }
+    });
   } else {
     composer.title = "-- NORMAL --";
     composer.borderColor = "#334155";
-    input.placeholder = "Press i to insert, : for commands, or u for upmerge";
+    input.placeholder =
+      "Press i to insert, : for commands, !/@ for shell, or u for upmerge";
     setComposerText("");
     input.blur();
   }
@@ -1313,11 +1440,13 @@ function updateSidebar(note = "Ready for your next prompt.") {
     "Shortcuts",
     "i      insert mode",
     ":      command mode",
+    "!      shell mode",
+    "@      agent shell mode",
     "j / k  scroll transcript",
     "G      jump to live bottom",
     "u      upmerge menu",
     "Esc    normal mode",
-    "Ctrl+C abort stream",
+    "Ctrl+C abort stream/command",
     "",
     "Commands",
     ":clear reset conversation",
@@ -1356,21 +1485,37 @@ function updateComposerHint() {
 
   if (busy) {
     composerHint.content =
-      autoScrollState === "paused"
-        ? "The agent is responding. Auto-scroll is paused while you audit earlier output. Press G to jump back to the live bottom, or Ctrl+C to abort."
-        : "The agent is responding. Press Ctrl+C to abort, or use j and k to inspect earlier messages.";
+      activeShellProcess
+        ? autoScrollState === "paused"
+          ? "A shell command is running. Auto-scroll is paused while you audit earlier output. Press G to jump back to the live bottom, or Ctrl+C to stop it."
+          : "A shell command is running. Press Ctrl+C to stop it, or use j and k to inspect earlier messages."
+        : autoScrollState === "paused"
+          ? "The agent is responding. Auto-scroll is paused while you audit earlier output. Press G to jump back to the live bottom, or Ctrl+C to abort."
+          : "The agent is responding. Press Ctrl+C to abort, or use j and k to inspect earlier messages.";
     return;
   }
 
   if (mode === "normal") {
     composerHint.content =
-      "Normal mode. Press i to compose, : for commands, u for upmerge, or j/k to scroll.";
+      "Normal mode. Press i to compose, : for commands, !/@ for shell, u for upmerge, or j/k to scroll.";
     return;
   }
 
   if (mode === "command") {
     composerHint.content =
       "Command mode. Run :clear, :index, :model, or :quit, or press Esc to return to normal.";
+    return;
+  }
+
+  if (mode === "shell") {
+    composerHint.content =
+      "Shell mode. Press Enter to run a local shell command that stays hidden from the agent.";
+    return;
+  }
+
+  if (mode === "agent_shell") {
+    composerHint.content =
+      "Agent shell mode. Press Enter to run a shell command and add its command and output to the agent conversation.";
     return;
   }
 
@@ -1439,6 +1584,8 @@ async function resetConversation() {
   });
   insertDraft = "";
   commandDraft = "";
+  shellDraft = "";
+  agentShellDraft = "";
   input.setText("");
   autoScrollState = "follow";
   updateComposerHint();
@@ -1557,11 +1704,205 @@ async function executeCommand(raw: string) {
   setMode("normal");
 }
 
+async function executeShellInput(raw: string, visibility: ShellVisibility) {
+  const command = raw.trim();
+
+  if (!command) {
+    return;
+  }
+
+  const shell =
+    process.platform === "win32"
+      ? process.env.ComSpec || "cmd.exe"
+      : process.env.SHELL || "/bin/sh";
+  const shellArgs =
+    process.platform === "win32"
+      ? ["/d", "/s", "/c", command]
+      : ["-lc", command];
+  const cwd = WORKSPACE_ROOT;
+  const cwdLabel = ".";
+
+  let stdout = "";
+  let stderr = "";
+  let stdoutTruncated = false;
+  let stderrTruncated = false;
+  let shellResult: ShellExecutionResult = {
+    stdout: "",
+    stderr: "",
+    exitCode: null,
+    signal: null,
+    startupError: null,
+    stdoutTruncated: false,
+    stderrTruncated: false,
+  };
+
+  const entry = appendEntry(
+    "system",
+    formatShellMessage({
+      command,
+      cwdLabel,
+      stdout,
+      stderr,
+      exitCode: null,
+      signal: null,
+      startupError: null,
+      stdoutTruncated,
+      stderrTruncated,
+      running: true,
+      visibility,
+    })
+  );
+
+  const refreshEntry = (running: boolean) => {
+    entry.body.content =
+      formatShellMessage({
+        command,
+        cwdLabel,
+        stdout,
+        stderr,
+        exitCode: shellResult.exitCode,
+        signal: shellResult.signal,
+        startupError: shellResult.startupError,
+        stdoutTruncated,
+        stderrTruncated,
+        running,
+        visibility,
+      }) || " ";
+    renderer.requestRender();
+    scrollToBottom();
+  };
+
+  setBusy(true);
+  updateComposerHint();
+  updateSidebar(`Running shell command in ${visibility} mode...`);
+  renderer.requestRender();
+
+  try {
+    shellResult = await new Promise<ShellExecutionResult>((resolve) => {
+      let child: ChildProcess;
+
+      try {
+        child = spawn(shell, shellArgs, {
+          cwd,
+          stdio: ["ignore", "pipe", "pipe"],
+          env: process.env,
+        });
+      } catch (error) {
+        resolve({
+          stdout,
+          stderr,
+          exitCode: null,
+          signal: null,
+          startupError: error instanceof Error ? error.message : String(error),
+          stdoutTruncated,
+          stderrTruncated,
+        });
+        return;
+      }
+
+      activeShellProcess = child;
+
+      child.stdout?.setEncoding("utf8");
+      child.stdout?.on("data", (chunk: string) => {
+        const next = appendChunkWithLimit(stdout, chunk);
+        stdout = next.value;
+        stdoutTruncated ||= next.truncated;
+        refreshEntry(true);
+      });
+
+      child.stderr?.setEncoding("utf8");
+      child.stderr?.on("data", (chunk: string) => {
+        const next = appendChunkWithLimit(stderr, chunk);
+        stderr = next.value;
+        stderrTruncated ||= next.truncated;
+        refreshEntry(true);
+      });
+
+      child.on("error", (error) => {
+        resolve({
+          stdout,
+          stderr,
+          exitCode: null,
+          signal: null,
+          startupError: error instanceof Error ? error.message : String(error),
+          stdoutTruncated,
+          stderrTruncated,
+        });
+      });
+
+      child.on("close", (exitCode, signal) => {
+        resolve({
+          stdout,
+          stderr,
+          exitCode,
+          signal,
+          startupError: null,
+          stdoutTruncated,
+          stderrTruncated,
+        });
+      });
+    });
+
+    stdout = shellResult.stdout;
+    stderr = shellResult.stderr;
+    stdoutTruncated = shellResult.stdoutTruncated;
+    stderrTruncated = shellResult.stderrTruncated;
+    refreshEntry(false);
+
+    if (visibility === "agent") {
+      conversation.push({
+        role: "system",
+        content: formatShellMessage({
+          command,
+          cwdLabel,
+          stdout,
+          stderr,
+          exitCode: shellResult.exitCode,
+          signal: shellResult.signal,
+          startupError: shellResult.startupError,
+          stdoutTruncated,
+          stderrTruncated,
+          running: false,
+          visibility,
+        }),
+      });
+    }
+  } finally {
+    activeShellProcess = null;
+    setBusy(false);
+    updateComposerHint();
+    updateSidebar(
+      visibility === "agent"
+        ? "Agent shell command complete."
+        : "Shell command complete."
+    );
+    renderer.requestRender();
+  }
+}
+
 async function submitPrompt() {
   if (busy) return;
 
   if (mode === "command") {
     await executeCommand(commandDraft);
+    return;
+  }
+
+  if (mode === "shell") {
+    const command = shellDraft.trim();
+    shellDraft = "";
+    input.setText("");
+    setMode("normal");
+    await executeShellInput(command, "local");
+    return;
+  }
+
+  if (mode === "agent_shell") {
+    const command = agentShellDraft.trim();
+    agentShellDraft = "";
+    input.setText("");
+    setMode("normal");
+    await executeShellInput(command, "agent");
     return;
   }
 
@@ -1713,14 +2054,26 @@ function isColonKey(key: KeyEvent) {
   return key.sequence === ":" || (key.shift && key.name === ";");
 }
 
+function isShellKey(key: KeyEvent) {
+  return key.sequence === "!" || (key.shift && key.name === "1");
+}
+
+function isAgentShellKey(key: KeyEvent) {
+  return key.sequence === "@" || (key.shift && key.name === "2");
+}
+
 function handleGlobalKey(key: KeyEvent) {
   if (key.ctrl && key.name === "c") {
     if (activeStreamAbortController) {
       updateSidebar("Aborting current stream...");
       activeStreamAbortController.abort();
       renderer.requestRender();
+    } else if (activeShellProcess) {
+      updateSidebar("Stopping current shell command...");
+      activeShellProcess.kill("SIGINT");
+      renderer.requestRender();
     } else {
-      updateSidebar("No active stream to abort. Use :quit to exit.");
+      updateSidebar("No active stream or shell command to abort. Use :quit to exit.");
       renderer.requestRender();
     }
     return;
@@ -1779,6 +2132,18 @@ function handleGlobalKey(key: KeyEvent) {
     return;
   }
 
+  if (!busy && isShellKey(key)) {
+    shellDraft = "";
+    setMode("shell");
+    return;
+  }
+
+  if (!busy && isAgentShellKey(key)) {
+    agentShellDraft = "";
+    setMode("agent_shell");
+    return;
+  }
+
   if (key.name === "u") {
     void openUpmergeMenu();
     return;
@@ -1828,6 +2193,10 @@ input.onContentChange = () => {
 
   if (mode === "command") {
     commandDraft = value;
+  } else if (mode === "shell") {
+    shellDraft = value;
+  } else if (mode === "agent_shell") {
+    agentShellDraft = value;
   } else {
     insertDraft = value;
   }
