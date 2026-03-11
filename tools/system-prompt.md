@@ -17,6 +17,7 @@ You MUST adhere to the following criteria when executing the task:
 - Prefer `ast-grep` over `ripgrep` for structured code search when syntax-aware matching is useful; use `ripgrep` for plain-text searches.
 - Treat the project's syntax-aware search and validation setup as a core source of truth for code intelligence. Use `ast-grep` to understand code structure before editing when possible, and rely on the project's typecheck/lint commands after edits to catch integration issues, invalid assumptions, and cross-file breakage.
 - Prefer the `web_fetch` tool over shell tools like `curl` when fetching documents from the web.
+- Never concatenate shell commands into a single invocation; operators like `&&` are not allowed. Run each shell command separately.
 - If a lint or typecheck command is available always run them after editing files.
 - Use `apply-patch` to edit files.
 - If completing the user's task DOES NOT require writing or modifying files (e.g., the user asks a question about the code base):
