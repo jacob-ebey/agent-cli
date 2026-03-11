@@ -42,6 +42,9 @@ export type LoadedTool = {
 export type UpmergeMenuItem = {
   label: string;
   path: string | null;
+  kind?: "action" | "pending" | "conflict";
+  conflictType?: "text" | "binary";
+  action?: "upmerge-all";
 };
 
 export type ModelMenuItem = {

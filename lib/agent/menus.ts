@@ -1,16 +1,19 @@
 import type { ConversationHistoryItem, ModelMenuItem, UpmergeMenuItem } from "./types.ts";
 import { buildConversationPreview, formatConversationTimestamp } from "./utils.ts";
 import { buildModelMenuContent, computeModelViewportTop, filterModelItems, moveModelSelection, normalizeModelSelection, selectedModelItem } from "./model-menu.ts";
-import { getUpmergePreview, getUpmergeStatus, revertRelativePath, upmergeAll, upmergeRelativePath } from "../../worktree.ts";
+import {
+  getUpmergePreview,
+  getUpmergeStatus,
+  resolveUpmergeConflict,
+  revertRelativePath,
+  upmergeAll,
+  upmergeRelativePath,
+} from "../../worktree.ts";
 import { listAvailableModels } from "../llm.ts";
 import { loadConversationHistory } from "./conversation-store.ts";
 
 export function currentUpmergeItems(upmergeItems: UpmergeMenuItem[]) {
-  if (!upmergeItems.length) {
-    return [];
-  }
-
-  return [{ label: "Upmerge all pending files", path: null }, ...upmergeItems];
+  return upmergeItems;
 }
 
 export function selectedUpmergeItem(options: {
@@ -43,10 +46,33 @@ export async function refreshUpmergeState(options: {
   upmergeSelection: number;
 }) {
   const status = await getUpmergeStatus();
-  const upmergeItems = status.pendingFiles.map((entry) => ({
-    label: entry,
-    path: entry,
-  }));
+  const upmergeItems: UpmergeMenuItem[] = [];
+
+  if (status.pendingFiles.length) {
+    upmergeItems.push({
+      label: "Upmerge all pending files",
+      path: null,
+      kind: "action",
+      action: "upmerge-all",
+    });
+  }
+
+  upmergeItems.push(
+    ...status.pendingFiles.map((entry) => ({
+      label: entry,
+      path: entry,
+      kind: "pending" as const,
+    }))
+  );
+
+  upmergeItems.push(
+    ...status.conflictedFiles.map((entry) => ({
+      label: `${entry.type === "text" ? "[text conflict]" : "[binary conflict]"} ${entry.path}`,
+      path: entry.path,
+      kind: "conflict" as const,
+      conflictType: entry.type,
+    }))
+  );
 
   const items = currentUpmergeItems(upmergeItems);
   let upmergeSelection = options.upmergeSelection;
@@ -74,7 +100,7 @@ export async function refreshUpmergeState(options: {
 export async function runUpmergeSelection(options: {
   upmergeItems: UpmergeMenuItem[];
   upmergeSelection: number;
-  action: "upmerge" | "revert";
+  action: "upmerge" | "revert" | "accept-main" | "accept-worktree" | "mark-resolved";
 }) {
   const selected = selectedUpmergeItem(options);
   if (!selected) {
@@ -85,12 +111,21 @@ export async function runUpmergeSelection(options: {
     return { kind: "invalid-revert-all" as const };
   }
 
-  const message =
-    options.action === "upmerge"
-      ? selected.path === null
+  let message: string;
+  if (options.action === "upmerge") {
+    message =
+      selected.path === null || selected.action === "upmerge-all"
         ? await upmergeAll()
-        : await upmergeRelativePath(selected.path)
-      : await revertRelativePath(selected.path!);
+        : await upmergeRelativePath(selected.path);
+  } else if (options.action === "revert") {
+    message = await revertRelativePath(selected.path!);
+  } else {
+    if (!selected.path) {
+      return { kind: "empty" as const };
+    }
+
+    message = await resolveUpmergeConflict(selected.path, options.action);
+  }
 
   return { kind: "ok" as const, message };
 }

@@ -170,6 +170,25 @@ function parsePersistedConversationState(
               },
             ];
           }),
+          conflicts: Array.isArray(value.workspaceSession.conflicts)
+            ? value.workspaceSession.conflicts.flatMap((entry) => {
+                if (
+                  !isRecord(entry) ||
+                  typeof entry.relativePath !== "string" ||
+                  (entry.type !== "text" && entry.type !== "binary")
+                ) {
+                  return [];
+                }
+
+                return [
+                  {
+                    relativePath: entry.relativePath,
+                    type: entry.type,
+                    status: "pending" as const,
+                  },
+                ];
+              })
+            : [],
           gitRoot: value.workspaceSession.gitRoot,
           sessionRoot: value.workspaceSession.sessionRoot,
           worktreeRoot: value.workspaceSession.worktreeRoot,

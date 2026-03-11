@@ -38,28 +38,61 @@ function createUpmergeSidebarViewModel(
   state: SidebarPresentationState,
   note: string
 ): SidebarViewModel {
-  const items = state.upmergeItems.length
-    ? [{ label: "Upmerge all pending files", path: null }, ...state.upmergeItems]
-    : [];
+  const actionItems = state.upmergeItems.filter((item) => item.kind === "action");
+  const pendingItems = state.upmergeItems.filter((item) => item.kind === "pending");
+  const conflictItems = state.upmergeItems.filter((item) => item.kind === "conflict");
+
+  const sections: string[] = [];
+
+  if (actionItems.length) {
+    sections.push("Actions");
+    sections.push(
+      ...actionItems.map(
+        (item) => `${state.upmergeItems[state.upmergeSelection] === item ? ">" : " "} ${item.label}`
+      )
+    );
+  }
+
+  if (pendingItems.length) {
+    if (sections.length) {
+      sections.push("");
+    }
+    sections.push(`Pending files (${pendingItems.length})`);
+    sections.push(
+      ...pendingItems.map(
+        (item) => `${state.upmergeItems[state.upmergeSelection] === item ? ">" : " "} ${item.label}`
+      )
+    );
+  }
+
+  if (conflictItems.length) {
+    if (sections.length) {
+      sections.push("");
+    }
+    sections.push(`Conflicts (${conflictItems.length})`);
+    sections.push(
+      ...conflictItems.map(
+        (item) => `${state.upmergeItems[state.upmergeSelection] === item ? ">" : " "} ${item.label}`
+      )
+    );
+  }
 
   return {
     title: "Upmerge",
-    borderColor: "#22c55e",
+    borderColor: conflictItems.length ? "#f59e0b" : "#22c55e",
     content: [
       `Edits: ${state.upmergeMode}`,
-      `Pending: ${state.upmergeItems.length}`,
+      `Pending: ${pendingItems.length}`,
+      `Conflicts: ${conflictItems.length}`,
       "",
-      items.length
-        ? items
-            .map(
-              (item, index) => `${index === state.upmergeSelection ? ">" : " "} ${item.label}`
-            )
-            .join("\n")
-        : "No pending upmerges.",
+      sections.length ? sections.join("\n") : "No pending upmerges.",
       "",
       "Shortcuts",
       "Enter  upmerge selected item",
       "r      revert selected file",
+      "m      mark selected conflict resolved",
+      "1      resolve selected conflict with main",
+      "2      resolve selected conflict with worktree",
       "j / k  change selection",
       "u/Esc  close menu",
       "",
@@ -156,7 +189,7 @@ export function createComposerHintContent(state: SidebarPresentationState) {
   }
 
   if (state.upmergeMenuOpen) {
-    return "Upmerge menu open. Enter upmerges the selection, r reverts a selected file, and u/Esc closes it.";
+    return "Upmerge menu open. Enter upmerges the selection, r reverts a selected file, m marks a conflict resolved, 1 keeps main, 2 keeps worktree, and u/Esc closes it.";
   }
 
   if (state.historyMenuOpen) {

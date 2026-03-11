@@ -631,7 +631,9 @@ async function moveUpmergeSelection(delta: number) {
   updateSidebar();
 }
 
-async function runUpmergeSelection(action: "upmerge" | "revert") {
+async function runUpmergeSelection(
+  action: "upmerge" | "revert" | "accept-main" | "accept-worktree" | "mark-resolved"
+) {
   const selectedItem = currentUpmergeItems(upmergeItems)[upmergeSelection] ?? null;
   const shouldCloseAfterSuccess =
     action === "upmerge" && selectedItem?.path === null;
@@ -1006,6 +1008,15 @@ function updateSidebar(note = "Ready for your next prompt.") {
   sidebar.title = sidebarViewModel.title;
   sidebar.borderColor = sidebarViewModel.borderColor;
   sidebarText.content = sidebarViewModel.content;
+
+  if (upmergeMenuOpen) {
+    const selected = currentUpmergeItems(upmergeItems)[upmergeSelection] ?? null;
+    upmergePanel.title = selected?.kind === "conflict" ? "Upmerge Conflict" : "Upmerge Preview";
+    upmergePanel.borderColor = selected?.kind === "conflict" ? "#f59e0b" : "#22c55e";
+  } else {
+    upmergePanel.title = "Upmerge Preview";
+    upmergePanel.borderColor = "#22c55e";
+  }
 }
 
 function updateComposerHint() {
@@ -1607,6 +1618,12 @@ function handleGlobalKey(key: KeyEvent) {
       void runUpmergeSelection("upmerge");
     } else if (key.name === "r") {
       void runUpmergeSelection("revert");
+    } else if (key.name === "m") {
+      void runUpmergeSelection("mark-resolved");
+    } else if (key.sequence === "1") {
+      void runUpmergeSelection("accept-main");
+    } else if (key.sequence === "2") {
+      void runUpmergeSelection("accept-worktree");
     }
     return;
   }
