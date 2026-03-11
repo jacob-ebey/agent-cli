@@ -88,6 +88,7 @@ import {
   clearApprovalQueueState,
   currentApprovalPrompt,
   ensureToolApproval,
+  settleApprovalDecision,
   shiftNextPendingApproval,
 } from "./lib/agent/approvals.ts";
 import { runShellCommandSession } from "./lib/agent/shell-runner.ts";
@@ -1463,55 +1464,19 @@ async function settlePendingApproval(decision: ApprovalDecision) {
 
   activeApproval = null;
 
-  if (decision === "session") {
-    approvedEditTargets.add(request.approvalKey);
-    appendSystemMessage(
-      `Approved edits to \`${request.displayValue}\` for the rest of this session.`
-    );
-    updateSidebar(`Approved edits to ${request.displayValue}.`);
-  } else if (decision === "once") {
-    appendSystemMessage(
-      `Approved ${request.displayLabel.toLowerCase()} \`${
-        request.displayValue
-      }\` once.`
-    );
-    updateSidebar(`Approved ${request.displayLabel.toLowerCase()} once.`);
-  } else if (decision === "always") {
-    approvedShellCommands.add(request.approvalKey);
-    try {
-      await savePersistedShellApprovals(approvedShellCommands);
-      appendSystemMessage(
-        `Always approved command \`${request.displayValue}\`. Saved to \`.agents/shell.json\`.`
-      );
-      updateSidebar(`Saved approval for command ${request.displayValue}.`);
-    } catch (error) {
-      approvedShellCommands.delete(request.approvalKey);
-      const message = error instanceof Error ? error.message : String(error);
-      appendEntry(
-        "error",
-        `Failed to save shell approval for \`${request.displayValue}\`: ${message}`
-      );
-      updateSidebar(`Failed to save approval for ${request.displayValue}.`);
-      activateNextApproval();
-      updateComposerHint();
-      renderer.requestRender();
-      request.resolve("deny");
-      return;
-    }
-  } else {
-    appendSystemMessage(
-      `Denied ${request.displayLabel.toLowerCase()} \`${
-        request.displayValue
-      }\`.`
-    );
-    updateSidebar(
-      `Denied ${request.displayLabel.toLowerCase()} ${request.displayValue}.`
-    );
-  }
-  activateNextApproval();
-  updateComposerHint();
-  renderer.requestRender();
-  request.resolve(decision);
+  await settleApprovalDecision({
+    decision,
+    request,
+    approvedEditTargets,
+    approvedShellCommands,
+    savePersistedShellApprovals,
+    appendSystemMessage: (content) => appendSystemMessage(content),
+    appendErrorMessage: (content) => appendEntry("error", content),
+    updateSidebar,
+    afterQueueAdvanced: activateNextApproval,
+    updateComposerHint,
+    requestRender: () => renderer.requestRender(),
+  });
 }
 
 function updateSidebar(note = "Ready for your next prompt.") {

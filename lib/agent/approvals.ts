@@ -160,3 +160,72 @@ export function clearApprovalQueueState(options: {
     options.queuedApprovals.shift()?.resolve("deny");
   }
 }
+
+export async function settleApprovalDecision(options: {
+  decision: ApprovalDecision;
+  request: PendingApproval | null;
+  approvedEditTargets: Set<string>;
+  approvedShellCommands: Set<string>;
+  savePersistedShellApprovals: (approvedCommands: Set<string>) => Promise<void>;
+  appendSystemMessage: (content: string) => void;
+  appendErrorMessage: (content: string) => void;
+  updateSidebar: (note?: string) => void;
+  afterQueueAdvanced: () => void;
+  updateComposerHint: () => void;
+  requestRender: () => void;
+}) {
+  const request = options.request;
+  if (!request) {
+    return;
+  }
+
+  if (options.decision === "session") {
+    options.approvedEditTargets.add(request.approvalKey);
+    options.appendSystemMessage(
+      `Approved edits to \`${request.displayValue}\` for the rest of this session.`
+    );
+    options.updateSidebar(`Approved edits to ${request.displayValue}.`);
+  } else if (options.decision === "once") {
+    options.appendSystemMessage(
+      `Approved ${request.displayLabel.toLowerCase()} \`${
+        request.displayValue
+      }\` once.`
+    );
+    options.updateSidebar(`Approved ${request.displayLabel.toLowerCase()} once.`);
+  } else if (options.decision === "always") {
+    options.approvedShellCommands.add(request.approvalKey);
+    try {
+      await options.savePersistedShellApprovals(options.approvedShellCommands);
+      options.appendSystemMessage(
+        `Always approved command \`${request.displayValue}\`. Saved to \`.agents/shell.json\`.`
+      );
+      options.updateSidebar(`Saved approval for command ${request.displayValue}.`);
+    } catch (error) {
+      options.approvedShellCommands.delete(request.approvalKey);
+      const message = error instanceof Error ? error.message : String(error);
+      options.appendErrorMessage(
+        `Failed to save shell approval for \`${request.displayValue}\`: ${message}`
+      );
+      options.updateSidebar(`Failed to save approval for ${request.displayValue}.`);
+      options.afterQueueAdvanced();
+      options.updateComposerHint();
+      options.requestRender();
+      request.resolve("deny");
+      return;
+    }
+  } else {
+    options.appendSystemMessage(
+      `Denied ${request.displayLabel.toLowerCase()} \`${
+        request.displayValue
+      }\`.`
+    );
+    options.updateSidebar(
+      `Denied ${request.displayLabel.toLowerCase()} ${request.displayValue}.`
+    );
+  }
+
+  options.afterQueueAdvanced();
+  options.updateComposerHint();
+  options.requestRender();
+  request.resolve(options.decision);
+}
