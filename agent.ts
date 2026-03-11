@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -53,6 +53,8 @@ const CONFIG_DIRECTORY =
       );
 const CONFIG_PATH = path.join(CONFIG_DIRECTORY, "config.json");
 const SHELL_APPROVALS_PATH = path.join(WORKSPACE_ROOT, ".agents", "shell.json");
+const INPUT_HISTORY_PATH = path.join(tmpdir(), "agent-cli-input-history.json");
+const INPUT_HISTORY_LIMIT = 100;
 
 type ChatRole = "assistant" | "user" | "system" | "error";
 type Mode = "normal" | "insert" | "command" | "shell" | "agent_shell";
@@ -111,6 +113,16 @@ type PersistedShellApprovals = {
   version: 1;
   approvedCommands: string[];
 };
+
+type InputHistoryState = {
+  version: 1;
+  insert: string[];
+  command: string[];
+  shell: string[];
+  agent_shell: string[];
+};
+
+type HistoryMode = Exclude<Mode, "normal">;
 
 type ShellVisibility = "local" | "agent";
 
@@ -185,6 +197,74 @@ async function savePersistedConfig(config: PersistedConfig) {
 
 function parsePersistedShellCommand(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function emptyInputHistoryState(): InputHistoryState {
+  return {
+    version: 1,
+    insert: [],
+    command: [],
+    shell: [],
+    agent_shell: [],
+  };
+}
+
+function parseHistoryEntries(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const normalized = value
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter((entry) => entry.length > 0);
+
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+
+  for (const entry of normalized) {
+    if (seen.has(entry)) {
+      continue;
+    }
+
+    seen.add(entry);
+    deduped.push(entry);
+
+    if (deduped.length >= INPUT_HISTORY_LIMIT) {
+      break;
+    }
+  }
+
+  return deduped;
+}
+
+async function loadInputHistory(): Promise<InputHistoryState> {
+  try {
+    const source = await fs.readFile(INPUT_HISTORY_PATH, "utf-8");
+    const parsed = JSON.parse(source) as Partial<Record<keyof InputHistoryState, unknown>>;
+
+    return {
+      version: 1,
+      insert: parseHistoryEntries(parsed.insert),
+      command: parseHistoryEntries(parsed.command),
+      shell: parseHistoryEntries(parsed.shell),
+      agent_shell: parseHistoryEntries(parsed.agent_shell),
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return emptyInputHistoryState();
+    }
+
+    console.warn(`Failed to load input history from ${INPUT_HISTORY_PATH}:`, error);
+    return emptyInputHistoryState();
+  }
+}
+
+async function saveInputHistory(history: InputHistoryState) {
+  await fs.writeFile(
+    INPUT_HISTORY_PATH,
+    `${JSON.stringify(history, null, 2)}\n`,
+    "utf-8"
+  );
 }
 
 async function loadPersistedShellApprovals() {
@@ -631,10 +711,12 @@ const [initialSystemMessage, loadedTools] = await Promise.all([
   loadInitialSystemMessage(),
   loadTools(),
 ]);
-const [persistedConfig, approvedShellCommands] = await Promise.all([
-  loadPersistedConfig(),
-  loadPersistedShellApprovals(),
-]);
+const [persistedConfig, approvedShellCommands, persistedInputHistory] =
+  await Promise.all([
+    loadPersistedConfig(),
+    loadPersistedShellApprovals(),
+    loadInputHistory(),
+  ]);
 const tools = Array.from(loadedTools.values(), (tool) => ({
   name: tool.definition.name,
   description: tool.definition.description,
@@ -672,6 +754,25 @@ let insertDraft = "";
 let commandDraft = "";
 let shellDraft = "";
 let agentShellDraft = "";
+const inputHistory: InputHistoryState = {
+  version: 1,
+  insert: [...persistedInputHistory.insert],
+  command: [...persistedInputHistory.command],
+  shell: [...persistedInputHistory.shell],
+  agent_shell: [...persistedInputHistory.agent_shell],
+};
+const historyCursor: Record<HistoryMode, number> = {
+  insert: inputHistory.insert.length,
+  command: inputHistory.command.length,
+  shell: inputHistory.shell.length,
+  agent_shell: inputHistory.agent_shell.length,
+};
+const historyDrafts: Record<HistoryMode, string> = {
+  insert: "",
+  command: "",
+  shell: "",
+  agent_shell: "",
+};
 const entries: ChatEntry[] = [];
 let upmergeMode: "direct" | "worktree" = "direct";
 let upmergeNote =
@@ -1075,6 +1176,122 @@ function setComposerText(value: string) {
   input.setText(value);
 }
 
+function modeToHistoryMode(currentMode: Mode): HistoryMode | null {
+  if (currentMode === "normal") {
+    return null;
+  }
+
+  return currentMode;
+}
+
+function currentDraftForMode(currentMode: HistoryMode) {
+  if (currentMode === "command") {
+    return commandDraft;
+  }
+
+  if (currentMode === "shell") {
+    return shellDraft;
+  }
+
+  if (currentMode === "agent_shell") {
+    return agentShellDraft;
+  }
+
+  return insertDraft;
+}
+
+function setDraftForMode(currentMode: HistoryMode, value: string) {
+  if (currentMode === "command") {
+    commandDraft = value;
+    return;
+  }
+
+  if (currentMode === "shell") {
+    shellDraft = value;
+    return;
+  }
+
+  if (currentMode === "agent_shell") {
+    agentShellDraft = value;
+    return;
+  }
+
+  insertDraft = value;
+}
+
+async function persistInputHistory() {
+  try {
+    await saveInputHistory(inputHistory);
+  } catch (error) {
+    console.warn(`Failed to save input history to ${INPUT_HISTORY_PATH}:`, error);
+  }
+}
+
+// agent_shell shares history with shell so commands run in either mode are
+// visible when navigating history in the other.
+function historyKey(currentMode: HistoryMode): Exclude<HistoryMode, "agent_shell"> {
+  return currentMode === "agent_shell" ? "shell" : currentMode;
+}
+
+function resetHistoryCursor(currentMode: HistoryMode) {
+  const key = historyKey(currentMode);
+  historyCursor[key] = inputHistory[key].length;
+  historyDrafts[key] = "";
+}
+
+async function recordHistoryEntry(currentMode: HistoryMode, rawValue: string) {
+  const value = rawValue.trim();
+  if (!value) {
+    resetHistoryCursor(currentMode);
+    return;
+  }
+
+  const key = historyKey(currentMode);
+  const entries = inputHistory[key].filter((entry) => entry !== value);
+  entries.push(value);
+  inputHistory[key] = entries.slice(-INPUT_HISTORY_LIMIT);
+  resetHistoryCursor(currentMode);
+  await persistInputHistory();
+}
+
+function syncHistoryDraft(currentMode: HistoryMode, value: string) {
+  const key = historyKey(currentMode);
+  if (historyCursor[key] === inputHistory[key].length) {
+    historyDrafts[key] = value;
+  }
+}
+
+function navigateHistory(currentMode: HistoryMode, delta: -1 | 1) {
+  const key = historyKey(currentMode);
+  const entries = inputHistory[key];
+  if (!entries.length) {
+    return false;
+  }
+
+  const nextCursor = Math.max(
+    0,
+    Math.min(entries.length, historyCursor[key] + delta)
+  );
+
+  if (nextCursor === historyCursor[key]) {
+    return false;
+  }
+
+  if (historyCursor[key] === entries.length) {
+    historyDrafts[key] = currentDraftForMode(currentMode);
+  }
+
+  historyCursor[key] = nextCursor;
+  const nextValue =
+    nextCursor === entries.length ? historyDrafts[key] : entries[nextCursor] ?? "";
+  setDraftForMode(currentMode, nextValue);
+  setComposerText(nextValue);
+  moveComposerCursorToEnd(nextValue);
+  updateComposerHint();
+  renderer.requestRender();
+  return true;
+}
+
 function moveComposerCursorToEnd(value: string) {
   const desiredLength = value.length;
 
@@ -1227,10 +1444,10 @@ function setMode(nextMode: Mode) {
   mode = nextMode;
 
   if (mode === "insert") {
-    composer.title = "-- INSERT --";
+    composer.title = "-- INSERT -- [history]";
     composer.borderColor = "#3b82f6";
     input.placeholder =
-      "Type a message. Enter sends, Shift+Enter adds a new line";
+      "Type a message. Enter sends, Shift+Enter adds a new line, Up/Down browse history";
     setComposerText(insertDraft);
     process.nextTick(() => {
       if (mode === "insert") {
@@ -1240,9 +1457,9 @@ function setMode(nextMode: Mode) {
       }
     });
   } else if (mode === "command") {
-    composer.title = ":";
+    composer.title = ": [history]";
     composer.borderColor = "#f59e0b";
-    input.placeholder = "clear  model anthropic  index  quit";
+    input.placeholder = "clear  model anthropic  index  quit  (Up/Down history)";
     setComposerText(commandDraft);
     process.nextTick(() => {
       if (mode === "command") {
@@ -1252,9 +1469,9 @@ function setMode(nextMode: Mode) {
       }
     });
   } else if (mode === "shell") {
-    composer.title = "-- SHELL --";
+    composer.title = "-- SHELL -- [history]";
     composer.borderColor = "#14b8a6";
-    input.placeholder = "Type a shell command. Enter runs it locally";
+    input.placeholder = "Type a shell command. Enter runs it locally. Up/Down browse history";
     setComposerText(shellDraft);
     process.nextTick(() => {
       if (mode === "shell") {
@@ -1264,10 +1481,10 @@ function setMode(nextMode: Mode) {
       }
     });
   } else if (mode === "agent_shell") {
-    composer.title = "-- AGENT SHELL --";
+    composer.title = "-- AGENT SHELL -- [history]";
     composer.borderColor = "#8b5cf6";
     input.placeholder =
-      "Type a shell command. Enter runs it and shares output with the agent";
+      "Type a shell command. Enter runs it and shares output with the agent. Up/Down history";
     setComposerText(agentShellDraft);
     process.nextTick(() => {
       if (mode === "agent_shell") {
@@ -1884,12 +2101,14 @@ async function submitPrompt() {
   if (busy) return;
 
   if (mode === "command") {
+    await recordHistoryEntry("command", commandDraft);
     await executeCommand(commandDraft);
     return;
   }
 
   if (mode === "shell") {
     const command = shellDraft.trim();
+    await recordHistoryEntry("shell", shellDraft);
     shellDraft = "";
     input.setText("");
     setMode("normal");
@@ -1899,6 +2118,7 @@ async function submitPrompt() {
 
   if (mode === "agent_shell") {
     const command = agentShellDraft.trim();
+    await recordHistoryEntry("agent_shell", agentShellDraft);
     agentShellDraft = "";
     input.setText("");
     setMode("normal");
@@ -1912,6 +2132,8 @@ async function submitPrompt() {
 
   const content = insertDraft.trim();
   if (!content) return;
+
+  await recordHistoryEntry("insert", insertDraft);
 
   appendEntry("user", content);
   conversation.push({
@@ -2118,6 +2340,14 @@ function handleGlobalKey(key: KeyEvent) {
   }
 
   if (mode !== "normal") {
+    const historyMode = modeToHistoryMode(mode);
+
+    if (historyMode && (key.name === "up" || key.name === "down")) {
+      if (navigateHistory(historyMode, key.name === "up" ? -1 : 1)) {
+        return;
+      }
+    }
+
     return;
   }
 
@@ -2193,12 +2423,16 @@ input.onContentChange = () => {
 
   if (mode === "command") {
     commandDraft = value;
+    syncHistoryDraft("command", value);
   } else if (mode === "shell") {
     shellDraft = value;
+    syncHistoryDraft("shell", value);
   } else if (mode === "agent_shell") {
     agentShellDraft = value;
+    syncHistoryDraft("agent_shell", value);
   } else {
     insertDraft = value;
+    syncHistoryDraft("insert", value);
   }
   updateComposerHint();
 };
