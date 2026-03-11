@@ -1,8 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
 
 import {
   BoxRenderable,
@@ -22,26 +20,11 @@ import {
 } from "./lib/llm.ts";
 import {
   ACTIVE_CONVERSATION_PATH,
-  CONFIG_DIRECTORY,
-  CONFIG_PATH,
-  CONVERSATION_HISTORY_DIRECTORY,
   CONVERSATION_WORKTREES_DIRECTORY,
-  GITIGNORE_PATH,
-  INITIAL_TOOL_SEEDS,
   INPUT_HISTORY_LIMIT,
   INPUT_HISTORY_PATH,
-  LAUNCH_ARGUMENTS,
   MODEL_PRESETS,
-  PLAN_GITIGNORE_ENTRY,
-  PLAN_PATH,
-  PREVIOUS_CONVERSATION_PATH,
-  ROOT_AGENTS_PATH,
-  SHELL_APPROVALS_PATH,
-  SHELL_OUTPUT_CHAR_LIMIT,
-  SHOULD_RECALL_PREVIOUS_SESSION,
-  SYSTEM_PROMPT_PATH,
   THINKING_FRAMES,
-  TOOLS_DIRECTORY,
   WORKSPACE_ROOT,
 } from "./lib/agent/constants.ts";
 import type {
@@ -75,19 +58,37 @@ import type {
 } from "./lib/agent/types.ts";
 import {
   appendChunkWithLimit,
-  assistantMessageContainsToolCall,
   buildConversationPreview,
   extractAssistantText,
-  extractTextParts,
   formatConversationTimestamp,
   formatToolOutput,
   isRecord,
   lastAssistantResponseContainsToolCall,
-  matchOutputLabel,
-  normalizeWhitespace,
-  readIntegerArgument,
   readStringArgument,
 } from "./lib/agent/utils.ts";
+import {
+  ensurePlanFileReady,
+  loadInitialSystemMessage,
+  loadPersistedConfig,
+  loadPersistedShellApprovals,
+  savePersistedConfig,
+  savePersistedShellApprovals,
+} from "./lib/agent/config-store.ts";
+import {
+  createInitialConversationState,
+  isMeaningfulConversationState,
+  loadConversationHistory,
+  resolveInitialConversationState,
+  saveConversationStateToHistory,
+  savePersistedConversationState,
+  summarizeConversationTitleFromTranscript,
+} from "./lib/agent/conversation-store.ts";
+import { loadInputHistory, saveInputHistory } from "./lib/agent/input-history.ts";
+import {
+  loadInitialToolMessages,
+  loadTools,
+  summarizeToolResult,
+} from "./lib/agent/tools.ts";
 import { indexSkills } from "./lib/skills-index.ts";
 import {
   captureWorkspaceSession,
@@ -106,41 +107,6 @@ import {
 } from "./worktree.ts";
 
 
-function parsePersistedModel(value: unknown) {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-async function loadPersistedConfig(): Promise<PersistedConfig> {
-  try {
-    const source = await fs.readFile(CONFIG_PATH, "utf-8");
-    const parsed = JSON.parse(source) as {
-      currentModel?: unknown;
-    };
-    const currentModel = parsePersistedModel(parsed.currentModel);
-    return currentModel ? { currentModel } : {};
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return {};
-    }
-
-    console.warn(`Failed to load agent config from ${CONFIG_PATH}:`, error);
-    return {};
-  }
-}
-
-async function savePersistedConfig(config: PersistedConfig) {
-  await fs.mkdir(CONFIG_DIRECTORY, { recursive: true });
-  await fs.writeFile(
-    CONFIG_PATH,
-    `${JSON.stringify(config, null, 2)}\n`,
-    "utf-8"
-  );
-}
-
-function createConversationId() {
-  return `${Date.now()}-${randomUUID()}`;
-}
-
 function createInitialConversationMessages(): ConversationMessage[] {
   return [
     {
@@ -149,746 +115,6 @@ function createInitialConversationMessages(): ConversationMessage[] {
     },
     ...initialToolMessages,
   ];
-}
-
-function normalizeChatRole(value: unknown): ChatRole | null {
-  return value === "assistant" ||
-    value === "user" ||
-    value === "system" ||
-    value === "error"
-    ? value
-    : null;
-}
-
-function parsePersistedTranscript(value: unknown): PersistedTranscriptEntry[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  return value.flatMap((entry) => {
-    if (!isRecord(entry)) {
-      return [];
-    }
-
-    const role = normalizeChatRole(entry.role);
-    const content =
-      typeof entry.content === "string" ? entry.content.trimEnd() : null;
-    if (!role || content === null) {
-      return [];
-    }
-
-    return [{ role, content }];
-  });
-}
-
-function parsePersistedConversationMessages(
-  value: unknown
-): ConversationMessage[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  return value.flatMap((entry) => {
-    if (!isRecord(entry) || typeof entry.role !== "string" || !("content" in entry)) {
-      return [];
-    }
-
-    const localOnly =
-      entry.localOnly === undefined
-        ? undefined
-        : entry.localOnly === true
-          ? true
-          : false;
-
-    return [
-      {
-        ...(entry as Message),
-        localOnly,
-      },
-    ];
-  });
-}
-
-function summarizeConversationTitleFromTranscript(
-  transcriptEntries: PersistedTranscriptEntry[]
-) {
-  const source =
-    transcriptEntries.find((entry) => entry.role === "user")?.content ??
-    transcriptEntries.find((entry) => entry.role === "assistant")?.content ??
-    transcriptEntries[0]?.content ??
-    "New conversation";
-  const firstLine = source
-    .split("\n")
-    .map((line) => line.trim())
-    .find(Boolean);
-  if (!firstLine) {
-    return "New conversation";
-  }
-
-  return firstLine.length <= 72 ? firstLine : `${firstLine.slice(0, 69)}...`;
-}
-
-function createInitialConversationState(): PersistedConversationState {
-  const now = new Date().toISOString();
-  return {
-    version: 1,
-    id: createConversationId(),
-    title: "New conversation",
-    createdAt: now,
-    updatedAt: now,
-    workspaceSession: null,
-    conversation: createInitialConversationMessages(),
-    transcript: [],
-  };
-}
-
-function parsePersistedConversationState(
-  value: unknown
-): PersistedConversationState | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const id = typeof value.id === "string" && value.id.trim() ? value.id : null;
-  const title =
-    typeof value.title === "string" && value.title.trim()
-      ? value.title.trim()
-      : null;
-  const createdAt =
-    typeof value.createdAt === "string" && value.createdAt.trim()
-      ? value.createdAt
-      : null;
-  const updatedAt =
-    typeof value.updatedAt === "string" && value.updatedAt.trim()
-      ? value.updatedAt
-      : null;
-  const conversationMessages = parsePersistedConversationMessages(
-    value.conversation
-  );
-  const transcriptEntries = parsePersistedTranscript(value.transcript);
-  const workspaceSession =
-    isRecord(value.workspaceSession) &&
-    value.workspaceSession.mode === "worktree" &&
-    Array.isArray(value.workspaceSession.trackedFiles) &&
-    typeof value.workspaceSession.gitRoot === "string" &&
-    typeof value.workspaceSession.sessionRoot === "string" &&
-    typeof value.workspaceSession.worktreeRoot === "string" &&
-    typeof value.workspaceSession.worktreeWorkspaceRoot === "string" &&
-    typeof value.workspaceSession.baselinesRoot === "string"
-      ? ({
-          version: 1,
-          mode: "worktree",
-          note:
-            typeof value.workspaceSession.note === "string"
-              ? value.workspaceSession.note
-              : "Agent edits are isolated in a git worktree until you upmerge them.",
-          trackedFiles: value.workspaceSession.trackedFiles.flatMap((entry) => {
-            if (!isRecord(entry) || typeof entry.relativePath !== "string") {
-              return [];
-            }
-
-            return [
-              {
-                relativePath: entry.relativePath,
-                baselinePath:
-                  typeof entry.baselinePath === "string" ? entry.baselinePath : null,
-                exists: entry.exists === true,
-              },
-            ];
-          }),
-          gitRoot: value.workspaceSession.gitRoot,
-          sessionRoot: value.workspaceSession.sessionRoot,
-          worktreeRoot: value.workspaceSession.worktreeRoot,
-          worktreeWorkspaceRoot: value.workspaceSession.worktreeWorkspaceRoot,
-          baselinesRoot: value.workspaceSession.baselinesRoot,
-        } satisfies PersistedWorkspaceSession)
-      : null;
-
-  if (!id || !title || !createdAt || !updatedAt || !conversationMessages.length) {
-    return null;
-  }
-
-  return {
-    version: 1,
-    id,
-    title,
-    createdAt,
-    updatedAt,
-    workspaceSession,
-    conversation: conversationMessages,
-    transcript: transcriptEntries,
-  };
-}
-
-async function loadPersistedConversationState(
-  filePath: string
-): Promise<PersistedConversationState | null> {
-  try {
-    const source = await fs.readFile(filePath, "utf-8");
-    return parsePersistedConversationState(JSON.parse(source));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return null;
-    }
-
-    console.warn(`Failed to load conversation state from ${filePath}:`, error);
-    return null;
-  }
-}
-
-async function savePersistedConversationState(
-  filePath: string,
-  state: PersistedConversationState
-) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, `${JSON.stringify(state, null, 2)}\n`, "utf-8");
-}
-
-async function saveConversationStateToHistory(state: PersistedConversationState) {
-  await savePersistedConversationState(
-    path.join(CONVERSATION_HISTORY_DIRECTORY, `${state.id}.json`),
-    state
-  );
-}
-
-async function loadConversationHistory() {
-  try {
-    const files = await fs.readdir(CONVERSATION_HISTORY_DIRECTORY);
-    const loaded = await Promise.all(
-      files
-        .filter((file) => file.endsWith(".json"))
-        .map(async (file) => {
-          const filePath = path.join(CONVERSATION_HISTORY_DIRECTORY, file);
-          const state = await loadPersistedConversationState(filePath);
-          if (!state) {
-            return null;
-          }
-
-          return {
-            ...state,
-            filePath,
-          } satisfies ConversationHistoryItem;
-        })
-    );
-
-    return loaded
-      .filter((entry): entry is ConversationHistoryItem => entry !== null)
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return [] as ConversationHistoryItem[];
-    }
-
-    console.warn(
-      `Failed to load conversation history from ${CONVERSATION_HISTORY_DIRECTORY}:`,
-      error
-    );
-    return [] as ConversationHistoryItem[];
-  }
-}
-
-async function resolveInitialConversationState() {
-  const [activeState, previousState] = await Promise.all([
-    loadPersistedConversationState(ACTIVE_CONVERSATION_PATH),
-    loadPersistedConversationState(PREVIOUS_CONVERSATION_PATH),
-  ]);
-
-  if (SHOULD_RECALL_PREVIOUS_SESSION) {
-    return activeState && isMeaningfulConversationState(activeState)
-      ? activeState
-      : previousState && isMeaningfulConversationState(previousState)
-        ? previousState
-        : activeState ?? previousState ?? createInitialConversationState();
-  }
-
-  if (activeState && isMeaningfulConversationState(activeState)) {
-    await savePersistedConversationState(PREVIOUS_CONVERSATION_PATH, activeState);
-    await saveConversationStateToHistory(activeState);
-  }
-
-  return createInitialConversationState();
-}
-
-
-function isMeaningfulConversationState(
-  state: PersistedConversationState | null
-): state is PersistedConversationState {
-  if (!state) {
-    return false;
-  }
-
-  return (
-    state.workspaceSession !== null ||
-    state.transcript.some(
-      (entry) =>
-        entry.role === "user" || entry.role === "assistant" || entry.role === "error"
-    )
-  );
-}
-
-
-function parsePersistedShellCommand(value: unknown) {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function emptyInputHistoryState(): InputHistoryState {
-  return {
-    version: 1,
-    insert: [],
-    command: [],
-    shell: [],
-    agent_shell: [],
-  };
-}
-
-function parseHistoryEntries(value: unknown) {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  const normalized = value
-    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
-    .filter((entry) => entry.length > 0);
-
-  const deduped: string[] = [];
-  const seen = new Set<string>();
-
-  for (const entry of normalized) {
-    if (seen.has(entry)) {
-      continue;
-    }
-
-    seen.add(entry);
-    deduped.push(entry);
-
-    if (deduped.length >= INPUT_HISTORY_LIMIT) {
-      break;
-    }
-  }
-
-  return deduped;
-}
-
-async function loadInputHistory(): Promise<InputHistoryState> {
-  try {
-    const source = await fs.readFile(INPUT_HISTORY_PATH, "utf-8");
-    const parsed = JSON.parse(source) as Partial<Record<keyof InputHistoryState, unknown>>;
-
-    return {
-      version: 1,
-      insert: parseHistoryEntries(parsed.insert),
-      command: parseHistoryEntries(parsed.command),
-      shell: parseHistoryEntries(parsed.shell),
-      agent_shell: parseHistoryEntries(parsed.agent_shell),
-    };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return emptyInputHistoryState();
-    }
-
-    console.warn(`Failed to load input history from ${INPUT_HISTORY_PATH}:`, error);
-    return emptyInputHistoryState();
-  }
-}
-
-async function saveInputHistory(history: InputHistoryState) {
-  await fs.writeFile(
-    INPUT_HISTORY_PATH,
-    `${JSON.stringify(history, null, 2)}\n`,
-    "utf-8"
-  );
-}
-
-async function loadPersistedShellConfig() {
-  try {
-    const source = await fs.readFile(SHELL_APPROVALS_PATH, "utf-8");
-    const parsed = JSON.parse(source) as {
-      approvedCommands?: unknown;
-      startupCommands?: unknown;
-    };
-    const approvedCommands = Array.isArray(parsed.approvedCommands)
-      ? parsed.approvedCommands
-          .map((entry) => parsePersistedShellCommand(entry))
-          .filter((entry): entry is string => entry !== null)
-      : [];
-    const startupCommands = Array.isArray(parsed.startupCommands)
-      ? parsed.startupCommands
-          .map((entry) => parsePersistedShellCommand(entry))
-          .filter((entry): entry is string => entry !== null)
-      : [];
-
-    return {
-      approvedCommands: new Set(approvedCommands),
-      startupCommands,
-    };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return {
-        approvedCommands: new Set<string>(),
-        startupCommands: [],
-      };
-    }
-
-    console.warn(
-      `Failed to load shell config from ${SHELL_APPROVALS_PATH}:`,
-      error
-    );
-    return {
-      approvedCommands: new Set<string>(),
-      startupCommands: [],
-    };
-  }
-}
-
-async function loadPersistedShellApprovals() {
-  const config = await loadPersistedShellConfig();
-  return config.approvedCommands;
-}
-
-async function savePersistedShellApprovals(approvedCommands: Set<string>) {
-  const existingConfig = await loadPersistedShellConfig();
-  const sortedApprovedCommands = [...approvedCommands].sort((left, right) =>
-    left.localeCompare(right)
-  );
-  const payload: PersistedShellApprovals = {
-    version: 1,
-    ...(sortedApprovedCommands.length > 0
-      ? { approvedCommands: sortedApprovedCommands }
-      : {}),
-    ...(existingConfig.startupCommands.length > 0
-      ? { startupCommands: existingConfig.startupCommands }
-      : {}),
-  };
-
-  await fs.mkdir(path.dirname(SHELL_APPROVALS_PATH), { recursive: true });
-  await fs.writeFile(
-    SHELL_APPROVALS_PATH,
-    `${JSON.stringify(payload, null, 2)}\n`,
-    "utf-8"
-  );
-}
-
-async function ensurePlanFileReady() {
-  await fs.mkdir(path.dirname(PLAN_PATH), { recursive: true });
-
-  try {
-    await fs.access(PLAN_PATH);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw error;
-    }
-
-    await fs.writeFile(PLAN_PATH, "", "utf-8");
-  }
-
-  let gitignoreSource = "";
-
-  try {
-    gitignoreSource = await fs.readFile(GITIGNORE_PATH, "utf-8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw error;
-    }
-  }
-
-  const existingEntries = new Set(
-    gitignoreSource
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-  );
-
-  if (existingEntries.has(PLAN_GITIGNORE_ENTRY)) {
-    return;
-  }
-
-  const nextSource = gitignoreSource.trimEnd()
-    ? `${gitignoreSource.trimEnd()}\n${PLAN_GITIGNORE_ENTRY}\n`
-    : `${PLAN_GITIGNORE_ENTRY}\n`;
-
-  await fs.writeFile(GITIGNORE_PATH, nextSource, "utf-8");
-}
-
-async function loadRootAgentsGuidance() {
-  try {
-    const source = await fs.readFile(ROOT_AGENTS_PATH, "utf-8");
-    const trimmedSource = source.trim();
-    if (!trimmedSource) {
-      return null;
-    }
-
-    return [
-      "Additional repository guidance from the workspace root `AGENTS.md` file:",
-      "",
-      "<AGENTS.md>",
-      trimmedSource,
-      "</AGENTS.md>",
-    ].join("\n");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return null;
-    }
-
-    throw error;
-  }
-}
-
-async function loadInitialSystemMessage() {
-  const [baseSystemPrompt, rootAgentsGuidance] = await Promise.all([
-    fs.readFile(SYSTEM_PROMPT_PATH, "utf-8"),
-    loadRootAgentsGuidance(),
-  ]);
-
-  return [
-    baseSystemPrompt,
-    rootAgentsGuidance,
-  ]
-    .filter((part) => part && part.trim())
-    .join("\n\n");
-}
-
-function parseToolDefinition(source: string): ToolDefinition | null {
-  const nameMatch = source.match(/^#\s*`?([a-zA-Z0-9_-]+)`?\s*$/m);
-  const descriptionMatch = source.match(
-    /##\s*Description\s*\n+([\s\S]*?)(?=\n##\s|\s*$)/
-  );
-  const parametersMatch = source.match(
-    /##\s*Parameters\s*\n+```json\s*\n([\s\S]*?)\n```/
-  );
-
-  if (!nameMatch || !descriptionMatch || !parametersMatch) {
-    return null;
-  }
-
-  return {
-    name: nameMatch[1],
-    description: normalizeWhitespace(descriptionMatch[1]),
-    inputSchema: JSON.parse(parametersMatch[1]),
-  };
-}
-
-function parseToolMetadata(source: string): ToolMetadata {
-  const metadataMatch = source.match(
-    /##\s*Metadata\s*\n+```json\s*\n([\s\S]*?)\n```/
-  );
-  if (!metadataMatch) {
-    return {
-      requiresApproval: false,
-      approvalScope: "path",
-      approvalPersistence: "session",
-    };
-  }
-
-  const parsed = JSON.parse(metadataMatch[1]) as {
-    requiresApproval?: unknown;
-    approvalScope?: unknown;
-    approvalPersistence?: unknown;
-  };
-
-  return {
-    requiresApproval: parsed.requiresApproval === true,
-    approvalScope: parsed.approvalScope === "command" ? "command" : "path",
-    approvalPersistence:
-      parsed.approvalPersistence === "persisted" ? "persisted" : "session",
-  };
-}
-
-async function loadTools() {
-  const files = await fs.readdir(TOOLS_DIRECTORY);
-  const loadedTools = await Promise.all(
-    files
-      .filter((file) => file.endsWith(".md") && file !== "system-prompt.md")
-      .map(async (file) => {
-        const source = await fs.readFile(
-          path.join(TOOLS_DIRECTORY, file),
-          "utf-8"
-        );
-        const parsedDefinition = parseToolDefinition(source);
-        const metadata = parseToolMetadata(source);
-        if (!parsedDefinition) {
-          return null;
-        }
-
-        const expectedName = path.basename(file, ".md");
-        if (parsedDefinition.name !== expectedName) {
-          throw new Error(
-            `Tool definition name "${parsedDefinition.name}" must match "${expectedName}.md".`
-          );
-        }
-
-        const modulePath = path.join(
-          WORKSPACE_ROOT,
-          TOOLS_DIRECTORY,
-          `${expectedName}.ts`
-        );
-        const toolModule = (await import(pathToFileURL(modulePath).href)) as {
-          execute?: ToolExecutor;
-        };
-
-        if (typeof toolModule.execute !== "function") {
-          throw new Error(
-            `Tool module "${expectedName}.ts" must export an execute function.`
-          );
-        }
-
-        return [
-          parsedDefinition.name,
-          {
-            definition: parsedDefinition,
-            execute: toolModule.execute,
-            metadata,
-          },
-        ] as const;
-      })
-  );
-
-  return new Map(
-    loadedTools.filter(
-      (entry): entry is readonly [string, LoadedTool] => entry !== null
-    )
-  );
-}
-
-function createInitialToolResultOutput(output: string) {
-  return {
-    type: "text" as const,
-    value: output,
-  };
-}
-
-async function loadInitialToolMessages(loadedTools: Map<string, LoadedTool>) {
-  const seeds: InitialToolMessageSeed[] = INITIAL_TOOL_SEEDS;
-  const seededResults = await Promise.all(
-    seeds.map(async (seed) => {
-      const tool = loadedTools.get(seed.toolName);
-      if (!tool) {
-        return null;
-      }
-
-      const output = await tool.execute(seed.input);
-      return {
-        ...seed,
-        output,
-      };
-    })
-  );
-  const completedSeeds = seededResults.filter(
-    (
-      seed
-    ): seed is InitialToolMessageSeed & {
-      output: string;
-    } => seed !== null
-  );
-
-  if (completedSeeds.length === 0) {
-    return [];
-  }
-
-  return [
-    {
-      role: "assistant",
-      content: completedSeeds.map((seed) => ({
-        type: "tool-call" as const,
-        toolCallId: seed.toolCallId,
-        toolName: seed.toolName,
-        input: seed.input,
-      })),
-    },
-    {
-      role: "tool",
-      content: completedSeeds.map((seed) => ({
-        type: "tool-result" as const,
-        toolCallId: seed.toolCallId,
-        toolName: seed.toolName,
-        output: createInitialToolResultOutput(seed.output),
-      })),
-    },
-  ] satisfies ConversationMessage[];
-}
-
-
-function summarizeToolResult(
-  toolName: string,
-  input: unknown,
-  output: unknown
-) {
-  const argumentsObject = isRecord(input) ? input : {};
-
-  switch (toolName) {
-    case "read_file": {
-      const requestedPath = readStringArgument(argumentsObject, "path");
-      const offset = readIntegerArgument(argumentsObject, "offset");
-      const limit = readIntegerArgument(argumentsObject, "limit");
-      const range = offset
-        ? limit
-          ? `Requested lines: ${offset}-${offset + limit - 1}.`
-          : `Requested from line ${offset}.`
-        : null;
-
-      return [
-        requestedPath
-          ? `Read file \`${requestedPath}\`.`
-          : "Read a workspace file.",
-        range,
-      ]
-        .filter(Boolean)
-        .join("\n");
-    }
-    case "ripgrep": {
-      const pattern = readStringArgument(argumentsObject, "pattern");
-      const requestedPath = readStringArgument(argumentsObject, "path") ?? ".";
-      const glob = readStringArgument(argumentsObject, "glob");
-      const matches = matchOutputLabel(output, "Matches");
-      const truncated = matchOutputLabel(output, "Truncated");
-
-      return [
-        pattern
-          ? `Searched files in \`${requestedPath}\` for \`${pattern}\`.`
-          : `Searched files in \`${requestedPath}\`.`,
-        glob ? `Glob: \`${glob}\`.` : null,
-        matches ? `${matches} result(s).` : null,
-        truncated ? truncated : null,
-      ]
-        .filter(Boolean)
-        .join("\n");
-    }
-    case "search_skills": {
-      const query = readStringArgument(argumentsObject, "query");
-      const indexedChunks = matchOutputLabel(output, "Indexed chunks");
-      const resultsCount =
-        typeof output === "string"
-          ? Array.from(output.matchAll(/^\d+\.\s/gm)).length
-          : null;
-
-      return [
-        query
-          ? `Searched indexed skills for \`${query}\`.`
-          : "Searched indexed skills.",
-        resultsCount !== null ? `${resultsCount} result(s).` : null,
-        indexedChunks ? `Indexed chunks available: ${indexedChunks}.` : null,
-      ]
-        .filter(Boolean)
-        .join("\n");
-    }
-    case "run_shell_command": {
-      const command = readStringArgument(argumentsObject, "command");
-      const requestedPath = readStringArgument(argumentsObject, "cwd") ?? ".";
-      const exitCode = matchOutputLabel(output, "Exit code");
-      const timedOut = matchOutputLabel(output, "Timed out");
-
-      return [
-        command
-          ? `Ran shell command \`${command}\` from \`${requestedPath}\`.`
-          : `Ran a shell command from \`${requestedPath}\`.`,
-        exitCode ? `Exit code: ${exitCode}.` : null,
-        timedOut ? `Timed out: ${timedOut}.` : null,
-      ]
-        .filter(Boolean)
-        .join("\n");
-    }
-    default:
-      return null;
-  }
 }
 
 
@@ -993,7 +219,9 @@ const [persistedConfig, approvedShellCommands, persistedInputHistory] =
     loadPersistedShellApprovals(),
     loadInputHistory(),
   ]);
-const initialConversationState = await resolveInitialConversationState();
+const initialConversationState = await resolveInitialConversationState(
+  createInitialConversationMessages()
+);
 const tools = Array.from(loadedTools.values(), (tool) => ({
   name: tool.definition.name,
   description: tool.definition.description,
@@ -2696,7 +1924,9 @@ async function resetConversation() {
   clearApprovalQueue();
   approvedEditTargets.clear();
   const archived = await archiveCurrentConversation();
-  replaceConversationState(createInitialConversationState());
+  replaceConversationState(
+    createInitialConversationState(createInitialConversationMessages())
+  );
   insertDraft = "";
   commandDraft = "";
   shellDraft = "";
