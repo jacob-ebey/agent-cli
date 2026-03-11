@@ -140,6 +140,7 @@ import {
   syncComposerDraft,
 } from "./lib/agent/input-controller.ts";
 import {
+  describeHelpOptions,
   describeModelOptions,
   resolveRequestedModel,
   runIndexCommand as runIndexCommandFlow,
@@ -1193,11 +1194,25 @@ async function runPlanCommand() {
   scrollToBottom(true);
 }
 
+function runHelpCommand() {
+  commandDraft = "";
+  setMode("normal");
+  appendSystemMessage(describeHelpOptions(currentModel));
+  updateSidebar("Displayed available commands.");
+  renderer.requestRender();
+  scrollToBottom(true);
+}
+
 async function executeCommand(raw: string) {
   const command = raw.trim();
 
   if (!command) {
     exitCommandMode();
+    return;
+  }
+
+  if (command === "help") {
+    runHelpCommand();
     return;
   }
 

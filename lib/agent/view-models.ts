@@ -114,26 +114,6 @@ function createSessionSidebarViewModel(
       `Messages: ${state.entriesCount}`,
       `Upmerges: ${state.upmergeItems.length}`,
       "",
-      "Shortcuts",
-      "i      insert mode",
-      ":      command mode",
-      "!      shell mode",
-      "@      agent shell mode",
-      "j / k  scroll transcript",
-      "G      jump to live bottom",
-      "u      upmerge menu",
-      "Esc    normal mode",
-      "Ctrl+C abort stream/command",
-      "",
-      "Commands",
-      ":clear reset conversation",
-      ":history browse saved chats",
-      ":index embed skill chunks",
-      ":model open searchable model picker",
-      ":plan show current PLAN.md",
-      ":summarize compress chat history",
-      ":quit  exit UI",
-      "",
       state.upmergeNote,
       "",
       note,
@@ -202,7 +182,7 @@ export function createComposerHintContent(state: SidebarPresentationState) {
   }
 
   if (state.mode === "command") {
-    return "Command mode. Run :clear, :history, :index, :model, :plan, :summarize, or :quit, or press Esc to return to normal.";
+    return "Command mode. Run :help, :clear, :history, :index, :model, :plan, :summarize, or :quit, or press Esc to return to normal.";
   }
 
   if (state.mode === "shell") {

@@ -7,6 +7,24 @@ import { buildConversationSummaryPrompt, createSummarizedConversationState, hasM
 import { resolveModelCommand } from "./model-menu.ts";
 import type { ConversationMessage, PersistedTranscriptEntry } from "./types.ts";
 
+export function describeHelpOptions(currentModel: string) {
+  return [
+    "Available commands",
+    "",
+    ":help       show available commands",
+    ":clear      reset the current conversation",
+    ":history    open saved conversation history",
+    ":index      embed and refresh skill chunks",
+    ":model      open the searchable model picker",
+    ":model ...  switch to a preset or explicit model id",
+    ":plan       show the current .agents/PLAN.md",
+    ":summarize  compress the current chat history",
+    ":quit       exit the UI",
+    "",
+    describeModelOptions(currentModel),
+  ].join("\n");
+}
+
 export function describeModelOptions(currentModel: string) {
   const presetLines = Object.entries(MODEL_PRESETS).map(
     ([name, modelId]) => `:model ${name.padEnd(10, " ")} ${modelId}`

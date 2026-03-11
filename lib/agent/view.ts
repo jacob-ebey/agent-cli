@@ -49,7 +49,7 @@ export const COMPOSER_MODE_CONFIG: Record<Mode, ComposerModeConfig> = {
     title: ": [history]",
     borderColor: "#f59e0b",
     placeholder:
-      "clear(c)  history(h)  model anthropic  index  plan  summarize  quit(q)  (Up/Down history)",
+      "help  clear(c)  history(h)  model anthropic  index  plan  summarize  quit(q)  (Up/Down history)",
   },
   shell: {
     title: "-- SHELL -- [history]",
