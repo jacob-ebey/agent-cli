@@ -454,6 +454,84 @@ async function loadTools() {
   );
 }
 
+type InitialToolMessageSeed = {
+  toolCallId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+};
+
+function createInitialToolResultOutput(output: string) {
+  return {
+    type: "text" as const,
+    value: output,
+  };
+}
+
+async function loadInitialToolMessages(loadedTools: Map<string, LoadedTool>) {
+  const seeds: InitialToolMessageSeed[] = [
+    {
+      toolCallId: "initial-list-project-tree",
+      toolName: "list_project_tree",
+      input: {
+        max_depth: 3,
+      },
+    },
+    {
+      toolCallId: "initial-read-file-package-json",
+      toolName: "read_file",
+      input: {
+        path: "package.json",
+      },
+    },
+  ];
+  const seededResults = await Promise.all(
+    seeds.map(async (seed) => {
+      const tool = loadedTools.get(seed.toolName);
+      if (!tool) {
+        return null;
+      }
+
+      const output = await tool.execute(seed.input);
+      return {
+        ...seed,
+        output,
+      };
+    })
+  );
+  const completedSeeds = seededResults.filter(
+    (
+      seed
+    ): seed is InitialToolMessageSeed & {
+      output: string;
+    } => seed !== null
+  );
+
+  if (completedSeeds.length === 0) {
+    return [];
+  }
+
+  return [
+    {
+      role: "assistant",
+      content: completedSeeds.map((seed) => ({
+        type: "tool-call" as const,
+        toolCallId: seed.toolCallId,
+        toolName: seed.toolName,
+        input: seed.input,
+      })),
+    },
+    {
+      role: "tool",
+      content: completedSeeds.map((seed) => ({
+        type: "tool-result" as const,
+        toolCallId: seed.toolCallId,
+        toolName: seed.toolName,
+        output: createInitialToolResultOutput(seed.output),
+      })),
+    },
+  ] satisfies ConversationMessage[];
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -714,6 +792,7 @@ const [initialSystemMessage, loadedTools] = await Promise.all([
   loadInitialSystemMessage(),
   loadTools(),
 ]);
+const initialToolMessages = await loadInitialToolMessages(loadedTools);
 
 const [persistedConfig, approvedShellCommands, persistedInputHistory] =
   await Promise.all([
@@ -749,6 +828,7 @@ const conversation: ConversationMessage[] = [
     role: "system",
     content: initialSystemMessage,
   },
+  ...initialToolMessages,
 ];
 
 let nextIdCounter = 0;
