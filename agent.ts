@@ -1457,6 +1457,7 @@ async function executeShellInput(raw: string, visibility: ShellVisibility) {
   try {
     shellResult = await runShellCommandSession({
       command,
+      cwd: getActiveWorkspaceAbsolutePath(),
       onProcessStart: (child) => {
         activeShellProcess = child;
       },

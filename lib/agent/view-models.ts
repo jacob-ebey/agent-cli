@@ -4,6 +4,8 @@ import type {
 } from "./types.ts";
 import { formatConversationTimestamp } from "./utils.ts";
 
+const numberFormatter = new Intl.NumberFormat();
+
 function createApprovalSidebarViewModel(
   state: SidebarPresentationState,
   note: string
@@ -24,7 +26,7 @@ function createApprovalSidebarViewModel(
       "Status: waiting",
       `Tool: ${state.activeApproval!.toolName}`,
       `${state.activeApproval!.displayLabel}: ${state.activeApproval!.displayValue}`,
-      `Queued: ${state.queuedApprovalsCount}`,
+      `Queued: ${numberFormatter.format(state.queuedApprovalsCount)}`,
       "",
       "Shortcuts",
       ...approvalShortcuts,
@@ -57,7 +59,7 @@ function createUpmergeSidebarViewModel(
     if (sections.length) {
       sections.push("");
     }
-    sections.push(`Pending files (${pendingItems.length})`);
+    sections.push(`Pending files (${numberFormatter.format(pendingItems.length)})`);
     sections.push(
       ...pendingItems.map(
         (item) => `${state.upmergeItems[state.upmergeSelection] === item ? ">" : " "} ${item.label}`
@@ -69,7 +71,7 @@ function createUpmergeSidebarViewModel(
     if (sections.length) {
       sections.push("");
     }
-    sections.push(`Conflicts (${conflictItems.length})`);
+    sections.push(`Conflicts (${numberFormatter.format(conflictItems.length)})`);
     sections.push(
       ...conflictItems.map(
         (item) => `${state.upmergeItems[state.upmergeSelection] === item ? ">" : " "} ${item.label}`
@@ -82,8 +84,8 @@ function createUpmergeSidebarViewModel(
     borderColor: conflictItems.length ? "#f59e0b" : "#22c55e",
     content: [
       `Edits: ${state.upmergeMode}`,
-      `Pending: ${pendingItems.length}`,
-      `Conflicts: ${conflictItems.length}`,
+      `Pending: ${numberFormatter.format(pendingItems.length)}`,
+      `Conflicts: ${numberFormatter.format(conflictItems.length)}`,
       "",
       sections.length ? sections.join("\n") : "No pending upmerges.",
       "",
@@ -110,7 +112,7 @@ function createHistorySidebarViewModel(
     title: "History",
     borderColor: "#38bdf8",
     content: [
-      `Saved chats: ${state.historyItems.length}`,
+      `Saved chats: ${numberFormatter.format(state.historyItems.length)}`,
       "",
       state.historyItems.length
         ? state.historyItems
@@ -145,9 +147,9 @@ function createSessionSidebarViewModel(
       `Status: ${state.streamPhase}`,
       `Mode: ${state.mode}`,
       `Model: ${state.currentModel}`,
-      `Messages: ${state.entriesCount}`,
+      `Messages: ${numberFormatter.format(state.entriesCount)}`,
       `Window: ${state.tokenWindowLabel}`,
-      `Upmerges: ${state.upmergeCount}`,
+      `Upmerges: ${numberFormatter.format(state.upmergeCount)}`,
       "",
       state.upmergeNote,
       "",
@@ -232,5 +234,5 @@ export function createComposerHintContent(state: SidebarPresentationState) {
     return "Insert mode. Press Enter to send or Shift+Enter to insert a new line.";
   }
 
-  return `Ready to send ${state.insertDraft.trim().length} characters.`;
+  return `Ready to send ${numberFormatter.format(state.insertDraft.trim().length)} characters.`;
 }
