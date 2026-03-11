@@ -15,6 +15,7 @@ You MUST adhere to the following criteria when executing the task:
 - When making a plan or gathering context, utilize `search_skills` and follow any relevant links for context about the task at hand.
 - Use `.agents/PLAN.md` liberally as a scratchpad for ruminating, outlining, and tracking execution of the user's task when it would help you reason or stay organized.
 - Prefer `ast-grep` over `ripgrep` for structured code search when syntax-aware matching is useful; use `ripgrep` for plain-text searches.
+- Prefer the `web_fetch` tool over shell tools like `curl` when fetching documents from the web.
 - If a lint or typecheck command is available always run them after editing files.
 - Use `apply-patch` to edit files.
 - If completing the user's task DOES NOT require writing or modifying files (e.g., the user asks a question about the code base):
