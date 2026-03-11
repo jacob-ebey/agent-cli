@@ -8,7 +8,9 @@ import {
 } from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 
-export type Message = ModelMessage;
+export type Message = ModelMessage & {
+  localOnly?: boolean;
+};
 
 export type Tool = {
   name: string;
@@ -106,6 +108,17 @@ export async function embedValues(values: string[]) {
   return embeddings;
 }
 
+function sanitizeMessages(messages: Message[]): ModelMessage[] {
+  return messages.flatMap((message) => {
+    if (message.localOnly) {
+      return [];
+    }
+
+    const { localOnly: _localOnly, ...modelMessage } = message;
+    return [modelMessage as ModelMessage];
+  });
+}
+
 export function streamResponse({
   model,
   messages,
@@ -119,7 +132,7 @@ export function streamResponse({
 }) {
   const result = streamText({
     model: shopifyGateway.chatModel(model),
-    messages,
+    messages: sanitizeMessages(messages),
     abortSignal,
     tools: Object.fromEntries(
       (tools ?? []).map((tool) => [

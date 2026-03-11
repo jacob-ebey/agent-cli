@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "approvedCommands": [
+    "pnpm exec tsc --noEmit"
+  ]
+}

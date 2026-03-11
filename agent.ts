@@ -58,6 +58,9 @@ const INPUT_HISTORY_LIMIT = 100;
 
 type ChatRole = "assistant" | "user" | "system" | "error";
 type Mode = "normal" | "insert" | "command" | "shell" | "agent_shell";
+type ConversationMessage = Message & {
+  localOnly?: boolean;
+};
 
 type ChatEntry = {
   id: string;
@@ -339,10 +342,10 @@ async function loadInitialSystemMessage() {
     loadRootAgentsGuidance(),
   ]);
 
+  await fs.writeFile("DEBUG.txt", rootAgentsGuidance ?? "");
+
   return [
     baseSystemPrompt,
-    "You are running inside a prototype OpenTUI chat interface.",
-    "Use the available tools when they would help you inspect the workspace before answering.",
     rootAgentsGuidance,
   ]
     .filter((part) => part && part.trim())
@@ -711,6 +714,7 @@ const [initialSystemMessage, loadedTools] = await Promise.all([
   loadInitialSystemMessage(),
   loadTools(),
 ]);
+
 const [persistedConfig, approvedShellCommands, persistedInputHistory] =
   await Promise.all([
     loadPersistedConfig(),
@@ -740,7 +744,7 @@ const renderer = await createCliRenderer({
 
 renderer.setBackgroundColor("#0b1020");
 
-const conversation: Message[] = [
+const conversation: ConversationMessage[] = [
   {
     role: "system",
     content: initialSystemMessage,
@@ -807,8 +811,7 @@ function announceActiveApproval() {
     return;
   }
 
-  appendEntry(
-    "system",
+  appendSystemMessage(
     [
       `Approval required before \`${activeApproval.toolName}\` can access ${activeApproval.displayLabel.toLowerCase()} \`${activeApproval.displayValue}\`.`,
       "",
@@ -1427,7 +1430,7 @@ async function runUpmergeSelection(action: "upmerge" | "revert") {
           ? await upmergeAll()
           : await upmergeRelativePath(selected.path)
         : await revertRelativePath(selected.path!);
-    appendEntry("system", message);
+    appendSystemMessage(message);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     appendEntry("error", message);
@@ -1537,14 +1540,12 @@ async function settlePendingApproval(decision: ApprovalDecision) {
 
   if (decision === "session") {
     approvedEditTargets.add(request.approvalKey);
-    appendEntry(
-      "system",
+    appendSystemMessage(
       `Approved edits to \`${request.displayValue}\` for the rest of this session.`
     );
     updateSidebar(`Approved edits to ${request.displayValue}.`);
   } else if (decision === "once") {
-    appendEntry(
-      "system",
+    appendSystemMessage(
       `Approved ${request.displayLabel.toLowerCase()} \`${
         request.displayValue
       }\` once.`
@@ -1554,8 +1555,7 @@ async function settlePendingApproval(decision: ApprovalDecision) {
     approvedShellCommands.add(request.approvalKey);
     try {
       await savePersistedShellApprovals(approvedShellCommands);
-      appendEntry(
-        "system",
+      appendSystemMessage(
         `Always approved command \`${request.displayValue}\`. Saved to \`.agents/shell.json\`.`
       );
       updateSidebar(`Saved approval for command ${request.displayValue}.`);
@@ -1574,8 +1574,7 @@ async function settlePendingApproval(decision: ApprovalDecision) {
       return;
     }
   } else {
-    appendEntry(
-      "system",
+    appendSystemMessage(
       `Denied ${request.displayLabel.toLowerCase()} \`${
         request.displayValue
       }\`.`
@@ -1782,6 +1781,36 @@ function appendEntry(role: ChatRole, content: string) {
   return entry;
 }
 
+function pushConversationMessage(
+  message: Message,
+  options: {
+    localOnly?: boolean;
+  } = {}
+) {
+  conversation.push(
+    options.localOnly ? { ...message, localOnly: true } : message
+  );
+}
+
+function appendSystemMessage(
+  content: string,
+  options: {
+    localOnly?: boolean;
+    recordInConversation?: boolean;
+  } = {}
+) {
+  appendEntry("system", content);
+  if (options.recordInConversation !== false) {
+    pushConversationMessage(
+      {
+        role: "system",
+        content,
+      },
+      { localOnly: options.localOnly ?? true }
+    );
+  }
+}
+
 function clearEntries() {
   for (const entry of [...entries]) {
     transcript.remove(entry.id);
@@ -1834,7 +1863,7 @@ async function executeCommand(raw: string) {
   }
 
   if (command === "model") {
-    appendEntry("system", describeModelOptions());
+    appendSystemMessage(describeModelOptions());
     commandDraft = "";
     setMode("normal");
     return;
@@ -1860,8 +1889,7 @@ async function executeCommand(raw: string) {
     currentModel = requestedModel;
     try {
       await savePersistedConfig({ currentModel });
-      appendEntry(
-        "system",
+      appendSystemMessage(
         `Switched model to \`${currentModel}\`. Future sessions will reuse it.`
       );
     } catch (error) {
@@ -1885,8 +1913,7 @@ async function executeCommand(raw: string) {
 
     try {
       const index = await indexSkills(WORKSPACE_ROOT);
-      appendEntry(
-        "system",
+      appendSystemMessage(
         [
           `Indexed ${index.chunks.length} skill chunk${
             index.chunks.length === 1 ? "" : "s"
@@ -2067,7 +2094,7 @@ async function executeShellInput(raw: string, visibility: ShellVisibility) {
     refreshEntry(false);
 
     if (visibility === "agent") {
-      conversation.push({
+      pushConversationMessage({
         role: "system",
         content: formatShellMessage({
           command,
@@ -2136,7 +2163,7 @@ async function submitPrompt() {
   await recordHistoryEntry("insert", insertDraft);
 
   appendEntry("user", content);
-  conversation.push({
+  pushConversationMessage({
     role: "user",
     content,
   });
@@ -2190,8 +2217,7 @@ async function submitPrompt() {
             break;
           case "tool-result":
             sawToolActivity = true;
-            appendEntry(
-              "system",
+            appendSystemMessage(
               summarizeToolResult(chunk.toolName, chunk.input, chunk.output) ??
                 [
                   `Tool \`${chunk.toolName}\` completed.`,
