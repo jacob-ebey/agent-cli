@@ -11,7 +11,7 @@ export const MODEL_PRESETS = {
   anthropic: "anthropic:claude-sonnet-4-6",
   openai: "openai:gpt-5.4",
   google: "google:gemini-3.1-pro-preview",
-  ollama: "ollama:qwen3:latest",
+  ollama: "ollama:qwen3.5:latest",
 } as const;
 
 export const CONFIG_DIRECTORY =

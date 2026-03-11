@@ -625,6 +625,10 @@ async function moveUpmergeSelection(delta: number) {
 }
 
 async function runUpmergeSelection(action: "upmerge" | "revert") {
+  const selectedItem = currentUpmergeItems(upmergeItems)[upmergeSelection] ?? null;
+  const shouldCloseAfterSuccess =
+    action === "upmerge" && selectedItem?.path === null;
+
   try {
     const result = await runUpmergeSelectionAction({
       upmergeItems,
@@ -645,6 +649,12 @@ async function runUpmergeSelection(action: "upmerge" | "revert") {
     }
 
     appendSystemMessage(result.message);
+    await refreshUpmergeState();
+
+    if (shouldCloseAfterSuccess) {
+      closeUpmergeMenu();
+    }
+    return;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     appendEntry("error", message);
