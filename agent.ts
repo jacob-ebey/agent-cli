@@ -142,8 +142,9 @@ type PersistedConfig = {
 };
 
 type PersistedShellApprovals = {
-  version: 1;
-  approvedCommands: string[];
+  version?: 1;
+  approvedCommands?: string[];
+  startupCommands?: string[];
 };
 
 type InputHistoryState = {
@@ -627,38 +628,65 @@ async function saveInputHistory(history: InputHistoryState) {
   );
 }
 
-async function loadPersistedShellApprovals() {
+async function loadPersistedShellConfig() {
   try {
     const source = await fs.readFile(SHELL_APPROVALS_PATH, "utf-8");
     const parsed = JSON.parse(source) as {
       approvedCommands?: unknown;
+      startupCommands?: unknown;
     };
     const approvedCommands = Array.isArray(parsed.approvedCommands)
       ? parsed.approvedCommands
           .map((entry) => parsePersistedShellCommand(entry))
           .filter((entry): entry is string => entry !== null)
       : [];
+    const startupCommands = Array.isArray(parsed.startupCommands)
+      ? parsed.startupCommands
+          .map((entry) => parsePersistedShellCommand(entry))
+          .filter((entry): entry is string => entry !== null)
+      : [];
 
-    return new Set(approvedCommands);
+    return {
+      approvedCommands: new Set(approvedCommands),
+      startupCommands,
+    };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return new Set<string>();
+      return {
+        approvedCommands: new Set<string>(),
+        startupCommands: [],
+      };
     }
 
     console.warn(
-      `Failed to load shell approvals from ${SHELL_APPROVALS_PATH}:`,
+      `Failed to load shell config from ${SHELL_APPROVALS_PATH}:`,
       error
     );
-    return new Set<string>();
+    return {
+      approvedCommands: new Set<string>(),
+      startupCommands: [],
+    };
   }
 }
 
+async function loadPersistedShellApprovals() {
+  const config = await loadPersistedShellConfig();
+  return config.approvedCommands;
+}
+
 async function savePersistedShellApprovals(approvedCommands: Set<string>) {
+  const existingConfig = await loadPersistedShellConfig();
+  const sortedApprovedCommands = [...approvedCommands].sort((left, right) =>
+    left.localeCompare(right)
+  );
   const payload: PersistedShellApprovals = {
     version: 1,
-    approvedCommands: [...approvedCommands].sort((left, right) =>
-      left.localeCompare(right)
-    ),
+    ...(sortedApprovedCommands.length > 0
+      ? { approvedCommands: sortedApprovedCommands }
+      : {}),
+    ...(existingConfig.startupCommands.length > 0
+      ? { startupCommands: existingConfig.startupCommands }
+      : {}),
   };
 
   await fs.mkdir(path.dirname(SHELL_APPROVALS_PATH), { recursive: true });

@@ -5,6 +5,7 @@ import * as path from "node:path";
 
 const ORIGINAL_WORKSPACE_ROOT = process.cwd();
 const DEV_NULL_PATH = "/dev/null";
+const SHELL_CONFIG_PATH = path.join(ORIGINAL_WORKSPACE_ROOT, ".agents", "shell.json");
 
 type BaselineRecord = {
   baselinePath: string | null;
@@ -219,6 +220,54 @@ async function syncWorkspaceChangesIntoWorktree(worktreeWorkspaceRoot: string) {
   }
 }
 
+async function loadStartupCommands() {
+  try {
+    const source = await fs.readFile(SHELL_CONFIG_PATH, "utf-8");
+    const parsed = JSON.parse(source) as {
+      startupCommands?: unknown;
+    };
+
+    if (!Array.isArray(parsed.startupCommands)) {
+      return [];
+    }
+
+    return parsed.startupCommands
+      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+      .filter((entry) => entry.length > 0);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return [];
+    }
+
+    console.warn(`Failed to load shell config from ${SHELL_CONFIG_PATH}:`, error);
+    return [];
+  }
+}
+
+async function runStartupCommands(worktreeWorkspaceRoot: string) {
+  const startupCommands = await loadStartupCommands();
+  for (const command of startupCommands) {
+    const shellCommand = process.platform === "win32" ? "cmd.exe" : "sh";
+    const shellArgs =
+      process.platform === "win32"
+        ? ["/d", "/s", "/c", command]
+        : ["-lc", command];
+    const result = await runCommand(
+      shellCommand,
+      shellArgs,
+      worktreeWorkspaceRoot
+    );
+
+    if (result.exitCode !== 0) {
+      throw new Error(
+        result.stderr.trim() ||
+          result.stdout.trim() ||
+          `Startup command failed: ${command}`
+      );
+    }
+  }
+}
+
 async function createWorktreeSession(gitRoot: string) {
   const sessionRoot = sessionStorageRoot
     ? sessionStorageRoot
@@ -248,6 +297,7 @@ async function createWorktreeSession(gitRoot: string) {
 
   await fs.mkdir(baselinesRoot, { recursive: true });
   await syncWorkspaceChangesIntoWorktree(worktreeWorkspaceRoot);
+  await runStartupCommands(worktreeWorkspaceRoot);
 
   sessionState = {
     initialized: true,
