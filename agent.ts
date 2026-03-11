@@ -1348,6 +1348,10 @@ let modelMenuErrors: string[] = [];
 let detailPanelAttached: DetailPanel = null;
 let activeStreamAbortController: AbortController | null = null;
 let activeShellProcess: ChildProcess | null = null;
+let activeThinkingIndicator: NodeJS.Timeout | null = null;
+let thinkingFrameIndex = 0;
+let latestSidebarNote = "Ready for your next prompt.";
+const THINKING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const approvedEditTargets = new Set<string>();
 let activeApproval: PendingApproval | null = null;
 const queuedApprovals: PendingApproval[] = [];
@@ -1443,6 +1447,31 @@ function updateTranscriptTitle() {
   transcriptPanel.title = busy ? "Conversation [...]" : "Conversation";
 }
 
+function stopThinkingIndicator() {
+  if (activeThinkingIndicator) {
+    clearInterval(activeThinkingIndicator);
+    activeThinkingIndicator = null;
+  }
+  thinkingFrameIndex = 0;
+}
+
+function startThinkingIndicator(baseNote = latestSidebarNote) {
+  latestSidebarNote = baseNote;
+  if (activeThinkingIndicator) {
+    return;
+  }
+
+  thinkingFrameIndex = 0;
+  updateSidebar(baseNote);
+  renderer.requestRender();
+
+  activeThinkingIndicator = setInterval(() => {
+    thinkingFrameIndex = (thinkingFrameIndex + 1) % THINKING_FRAMES.length;
+    updateSidebar(baseNote);
+    renderer.requestRender();
+  }, 80);
+}
+
 function hasMeaningfulTranscript() {
   return transcriptHistory.some(
     (entry) =>
@@ -1501,6 +1530,9 @@ async function archiveCurrentConversation() {
 
 function setBusy(nextBusy: boolean) {
   busy = nextBusy;
+  if (!busy) {
+    stopThinkingIndicator();
+  }
   updateTranscriptTitle();
 }
 
@@ -2626,6 +2658,12 @@ async function settlePendingApproval(decision: ApprovalDecision) {
 }
 
 function updateSidebar(note = "Ready for your next prompt.") {
+  latestSidebarNote = note;
+  const thinkingBadge =
+    busy && activeThinkingIndicator
+      ? ` ${THINKING_FRAMES[thinkingFrameIndex]} thinking`
+      : "";
+
   if (activeApproval) {
     const approvalShortcuts =
       activeApproval.approvalPersistence === "persisted"
@@ -2711,7 +2749,7 @@ function updateSidebar(note = "Ready for your next prompt.") {
   sidebar.title = "Session";
   sidebar.borderColor = "#334155";
   sidebarText.content = [
-    `Status: ${busy ? "streaming" : "idle"}`,
+    `Status: ${busy ? "streaming" : "idle"}${thinkingBadge}`,
     `Mode: ${mode}`,
     `Model: ${currentModel}`,
     `Messages: ${entries.length}`,
@@ -3311,6 +3349,7 @@ async function submitPrompt() {
   insertDraft = "";
   input.setText("");
   setMode("normal");
+  startThinkingIndicator(`Connecting to ${currentModel}...`);
   updateSidebar(`Connecting to ${currentModel}...`);
   let streamAborted = false;
 
@@ -3338,9 +3377,13 @@ async function submitPrompt() {
         for await (const chunk of result.stream) {
           switch (chunk.type) {
             case "reasoning":
+              if (!activeThinkingIndicator) {
+                startThinkingIndicator("Model is reasoning...");
+              }
               updateSidebar("Model is reasoning...");
               break;
             case "content":
+              stopThinkingIndicator();
               if (!assistantEntry) {
                 assistantEntry = appendEntry("assistant", "", {
                   recordInTranscript: false,
@@ -3365,14 +3408,17 @@ async function submitPrompt() {
               break;
             case "tool-call-start":
               sawToolActivity = true;
+              stopThinkingIndicator();
               updateSidebar(`Tool requested: ${chunk.toolName}`);
               break;
             case "tool-call-delta":
               sawToolActivity = true;
+              stopThinkingIndicator();
               updateSidebar(`Preparing tool input: ${chunk.toolName}`);
               break;
             case "tool-result":
               sawToolActivity = true;
+              stopThinkingIndicator();
               appendSystemMessage(
                 summarizeToolResult(chunk.toolName, chunk.input, chunk.output) ??
                   [
