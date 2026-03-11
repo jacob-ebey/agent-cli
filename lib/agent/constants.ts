@@ -1,10 +1,12 @@
+import { fileURLToPath } from "node:url";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 
 import type { InitialToolMessageSeed } from "./types.ts";
 
+const AGENT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 export const WORKSPACE_ROOT = process.cwd();
-export const TOOLS_DIRECTORY = "tools";
+export const TOOLS_DIRECTORY = path.resolve(AGENT_DIRECTORY, "..", "..", "tools");
 export const SYSTEM_PROMPT_PATH = path.join(TOOLS_DIRECTORY, "system-prompt.md");
 export const ROOT_AGENTS_PATH = path.join(WORKSPACE_ROOT, "AGENTS.md");
 export const MODEL_PRESETS = {

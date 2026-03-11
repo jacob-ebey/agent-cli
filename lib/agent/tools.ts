@@ -6,7 +6,6 @@ import {
   AGENTS_MD_INITIAL_TOOL_SEEDS,
   INITIAL_TOOL_SEEDS,
   TOOLS_DIRECTORY,
-  WORKSPACE_ROOT,
 } from "./constants.ts";
 import type {
   ConversationMessage,
@@ -93,11 +92,7 @@ export async function loadTools() {
           );
         }
 
-        const modulePath = path.join(
-          WORKSPACE_ROOT,
-          TOOLS_DIRECTORY,
-          `${expectedName}.ts`
-        );
+        const modulePath = path.join(TOOLS_DIRECTORY, `${expectedName}.ts`);
         const toolModule = (await import(pathToFileURL(modulePath).href)) as {
           execute?: ToolExecutor;
         };
