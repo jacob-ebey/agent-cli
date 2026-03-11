@@ -298,6 +298,24 @@ function sanitizeMessages(messages: Message[]): ModelMessage[] {
   });
 }
 
+export async function generateTextResponse({
+  model,
+  messages,
+  abortSignal,
+}: {
+  model: string;
+  messages: Message[];
+  abortSignal?: AbortSignal;
+}) {
+  const result = streamText({
+    model: getChatModel(model),
+    messages: sanitizeMessages(messages),
+    abortSignal,
+  });
+
+  return (await result.text).trim();
+}
+
 export function streamResponse({
   model,
   messages,

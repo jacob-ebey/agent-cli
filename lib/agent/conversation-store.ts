@@ -49,7 +49,7 @@ function parsePersistedTranscript(value: unknown): PersistedTranscriptEntry[] {
       return [];
     }
 
-    return [{ role, content }];
+    return [{ role, content, summary: entry.summary === true ? true : undefined }];
   });
 }
 

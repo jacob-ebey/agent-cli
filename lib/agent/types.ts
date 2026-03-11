@@ -106,6 +106,7 @@ export type ShellExecutionResult = {
 export type PersistedTranscriptEntry = {
   role: ChatRole;
   content: string;
+  summary?: boolean;
 };
 
 export type PersistedConversationState = {

@@ -12,6 +12,7 @@ import {
 } from "@opentui/core";
 
 import {
+  generateTextResponse,
   listAvailableModels,
   streamResponse,
   type Message,
@@ -340,6 +341,127 @@ function hasMeaningfulTranscript() {
     (entry) =>
       entry.role === "user" || entry.role === "assistant" || entry.role === "error"
   );
+}
+
+function formatTranscriptEntryForSummary(entry: PersistedTranscriptEntry) {
+  const label = entry.summary ? `${entry.role} summary` : entry.role;
+  return `${label}:\n${entry.content}`;
+}
+
+function buildConversationSummaryPrompt() {
+  const transcript = transcriptHistory
+    .map((entry) => formatTranscriptEntryForSummary(entry))
+    .join("\n\n");
+
+  return [
+    "Summarize this chat for future continuation after context compression.",
+    "Keep only information that must survive in chat history. Assume anything on disk can be re-read later.",
+    "Prioritize:",
+    "- current user goal and constraints",
+    "- decisions made and why",
+    "- unresolved questions or next steps",
+    "- important runtime findings not guaranteed to exist on disk",
+    "- concise summaries of tool activity and outcomes",
+    "- any temporary state the assistant should remember",
+    "",
+    "Omit or compress aggressively:",
+    "- full file contents",
+    "- verbose tool logs",
+    "- details that can be rediscovered from the repository",
+    "- repetitive back-and-forth",
+    "",
+    "Output plain text using this structure exactly:",
+    "Summary:",
+    "<short paragraph>",
+    "",
+    "Relevant context to retain:",
+    "- ...",
+    "",
+    "Open questions / next steps:",
+    "- ...",
+    "",
+    "Transcript:",
+    transcript || "(empty)",
+  ].join("\n");
+}
+
+async function summarizeActiveConversation() {
+  if (busy) {
+    updateSidebar("Wait for the current stream or shell command to finish before summarizing.");
+    renderer.requestRender();
+    return;
+  }
+
+  if (!hasMeaningfulTranscript()) {
+    appendSystemMessage("Nothing to summarize yet.");
+    commandDraft = "";
+    setMode("normal");
+    return;
+  }
+
+  commandDraft = "";
+  setBusy(true);
+  setMode("normal");
+  startThinkingIndicator(`Summarizing conversation with ${currentModel}...`);
+  updateSidebar(`Summarizing conversation with ${currentModel}...`);
+
+  try {
+    const summary = await generateTextResponse({
+      model: currentModel,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You compress chat history for an agent. Preserve only non-recoverable context needed to continue the task well. Be concise and reliable.",
+        },
+        {
+          role: "user",
+          content: buildConversationSummaryPrompt(),
+        },
+      ],
+    });
+
+    if (!summary) {
+      appendEntry(
+        "error",
+        "Conversation summarization returned an empty response. The existing chat history was left unchanged."
+      );
+      updateSidebar("Conversation summarization returned an empty response.");
+      return;
+    }
+
+    const preservedConversation = createInitialConversationMessages();
+    const preservedTranscript: PersistedTranscriptEntry[] = [
+      {
+        role: "system",
+        content: "Previous conversation context was compressed into the following summary.",
+        summary: true,
+      },
+      {
+        role: "assistant",
+        content: summary,
+        summary: true,
+      },
+    ];
+
+    conversation.splice(0, conversation.length, ...preservedConversation);
+    transcriptHistory.splice(0, transcriptHistory.length, ...preservedTranscript);
+    restoreTranscriptFromHistory();
+    await persistActiveConversation();
+    updateSidebar("Conversation summarized and compressed.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    appendEntry(
+      "error",
+      `Conversation summarization failed. Existing history was left unchanged.\n\n${message}`
+    );
+    updateSidebar("Conversation summarization failed.");
+  } finally {
+    setBusy(false);
+    updateComposerHint();
+    renderer.requestRender();
+    scrollToBottom(true);
+  }
 }
 
 function configureConversationWorkspace(conversationId: string) {
@@ -1359,7 +1481,7 @@ function setMode(nextMode: Mode) {
     composer.title = ": [history]";
     composer.borderColor = "#f59e0b";
     input.placeholder =
-      "clear(c)  history(h)  model anthropic  index  quit(q)  (Up/Down history)";
+      "clear(c)  history(h)  model anthropic  index  summarize  quit(q)  (Up/Down history)";
     setComposerText(commandDraft);
     process.nextTick(() => {
       if (mode === "command") {
@@ -1564,6 +1686,7 @@ function updateSidebar(note = "Ready for your next prompt.") {
     ":history browse saved chats",
     ":index embed skill chunks",
     ":model open searchable model picker",
+    ":summarize compress chat history",
     ":quit  exit UI",
     "",
     upmergeNote,
@@ -1627,7 +1750,7 @@ function updateComposerHint() {
 
   if (mode === "command") {
     composerHint.content =
-      "Command mode. Run :clear, :history, :index, :model, or :quit, or press Esc to return to normal.";
+      "Command mode. Run :clear, :history, :index, :model, :summarize, or :quit, or press Esc to return to normal.";
     return;
   }
 
@@ -1867,6 +1990,11 @@ async function executeCommand(raw: string) {
       updateComposerHint();
       renderer.requestRender();
     }
+    return;
+  }
+
+  if (command === "summarize" || command === "summary") {
+    await summarizeActiveConversation();
     return;
   }
 
