@@ -2,6 +2,43 @@
 
 `agent-cli` is a terminal-based agentic coding assistant built with TypeScript and ESM.
 
+It is designed for people who want an assistant that feels at home in a real codebase: one that can inspect files, reason across project structure, use local tools, work inside a git worktree, and stay transparent about what it is doing.
+
+Unlike browser-first coding assistants, `agent-cli` keeps the conversation close to your shell, your repository, and your existing workflow. You can point it at remote OpenAI-compatible models, run it against local Ollama models, and extend it with tools and repo-specific guidance.
+
+## Why try it?
+
+- **Terminal-native workflow**: work where you already debug, grep, test, and commit.
+- **Model flexibility**: use remote OpenAI-compatible backends or local Ollama models.
+- **Tool-driven behavior**: file reads, structured search, shell execution, and patch application are first-class parts of the runtime.
+- **Repo-aware guidance**: `AGENTS.md` and local skills let teams teach the assistant how the project works.
+- **Safer editing loop**: edits can happen in an agent-managed git worktree, with approvals and merge flows built in.
+- **Built for hacking**: the CLI itself is open source, small enough to understand, and straightforward to customize.
+
+## Features
+
+- Interactive terminal UI for chatting with an agent in the current workspace
+- Support for OpenAI-compatible providers and local Ollama models
+- Syntax-aware code search via `ast-grep` and fast text search via `ripgrep`
+- Shell command execution with approval controls and persisted approvals
+- Structured tool loading from `tools/*.md` plus TypeScript implementations
+- Workspace-scoped conversation history and persisted configuration
+- Local skill indexing for reusable implementation guidance
+- Git worktree support for isolating edits before merging them back
+- Commands for model switching, planning, summarizing, indexing, and worktree management
+
+## How it differs from Claude Code / Codex
+
+`agent-cli` sits in a similar category, but the emphasis is a bit different:
+
+- **More hackable**: the codebase is intentionally approachable, so you can inspect how tools, prompts, approvals, and streaming actually work.
+- **Bring your own models**: instead of tying you to a single hosted assistant, it works with OpenAI-compatible APIs and Ollama.
+- **Repository conventions are explicit**: project guidance lives in files such as `AGENTS.md` and `.agents/skills/`, rather than being hidden in a service.
+- **Local-first ergonomics**: it is comfortable in personal repos, experimental tools, and team workflows where shell access and local context matter.
+- **Less product wrapper, more programmable assistant runtime**: if you want to adapt behavior, add tools, or understand the control flow, you can.
+
+If you already use Claude Code or Codex, `agent-cli` may appeal if you want something more inspectable, more configurable, or easier to run against your own preferred model stack.
+
 ## Requirements
 
 Install these tools before getting started:
