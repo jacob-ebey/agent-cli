@@ -60,6 +60,13 @@ export type PendingApproval = {
   resolve: (decision: ApprovalDecision) => void;
 };
 
+export type ApprovalTarget = {
+  approvalKey: string;
+  displayLabel: string;
+  displayValue: string;
+  approvalPersistence: ApprovalPersistence;
+};
+
 export type AutoScrollState = "follow" | "paused";
 export type ModelPresetName = keyof typeof MODEL_PRESETS;
 

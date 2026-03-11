@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
@@ -85,6 +85,10 @@ import {
 } from "./lib/agent/conversation-store.ts";
 import { loadInputHistory, saveInputHistory } from "./lib/agent/input-history.ts";
 import {
+  ensureToolApproval,
+} from "./lib/agent/approvals.ts";
+import { runShellCommandSession } from "./lib/agent/shell-runner.ts";
+import {
   loadInitialToolMessages,
   loadTools,
   summarizeToolResult,
@@ -118,93 +122,6 @@ function createInitialConversationMessages(): ConversationMessage[] {
 }
 
 
-async function getApprovalTarget(
-  toolName: string,
-  tool: LoadedTool,
-  argumentsObject: Record<string, unknown>
-) {
-  if (!tool.metadata.requiresApproval) {
-    return null;
-  }
-
-  // File edits are already isolated once the session has moved into a worktree.
-  if (toolName === "apply-patch") {
-    const session = await prepareWorkspaceForEdit();
-    if (session.mode === "worktree") {
-      return null;
-    }
-  }
-
-  if (tool.metadata.approvalScope === "command") {
-    const command = readStringArgument(argumentsObject, "command");
-    if (!command) {
-      return null;
-    }
-
-    return {
-      approvalKey: command,
-      displayLabel: "Command",
-      displayValue: command,
-      approvalPersistence: tool.metadata.approvalPersistence,
-    };
-  }
-
-  const requestedPath = readStringArgument(argumentsObject, "path");
-  if (!requestedPath) {
-    return null;
-  }
-
-  const originalPath = resolveOriginalWorkspacePath(requestedPath);
-  return {
-    approvalKey: originalPath,
-    displayLabel: "File",
-    displayValue: relativeOriginalWorkspacePath(originalPath),
-    approvalPersistence: tool.metadata.approvalPersistence,
-  };
-}
-
-async function ensureToolApproval(
-  toolName: string,
-  tool: LoadedTool,
-  argumentsObject: Record<string, unknown>
-) {
-  const target = await getApprovalTarget(toolName, tool, argumentsObject);
-  if (!target) {
-    return;
-  }
-
-  if (
-    target.approvalPersistence === "session" &&
-    approvedEditTargets.has(target.approvalKey)
-  ) {
-    return;
-  }
-
-  if (
-    target.approvalPersistence === "persisted" &&
-    approvedShellCommands.has(target.approvalKey)
-  ) {
-    return;
-  }
-
-  const decision = await new Promise<ApprovalDecision>((resolve) => {
-    enqueueApproval({
-      toolName,
-      approvalKey: target.approvalKey,
-      displayLabel: target.displayLabel,
-      displayValue: target.displayValue,
-      approvalPersistence: target.approvalPersistence,
-      resolve,
-    });
-  });
-
-  if (decision === "deny") {
-    throw new Error(
-      `${target.displayLabel} not approved: ${target.displayValue}.`
-    );
-  }
-}
-
 await ensurePlanFileReady();
 
 const [initialSystemMessage, loadedTools] = await Promise.all([
@@ -230,7 +147,11 @@ const tools = Array.from(loadedTools.values(), (tool) => ({
     const parsedArguments = isRecord(input) ? input : {};
 
     try {
-      await ensureToolApproval(tool.definition.name, tool, parsedArguments);
+      await ensureToolApproval(tool.definition.name, tool, parsedArguments, {
+        approvedEditTargets,
+        approvedShellCommands,
+        enqueueApproval,
+      });
       return await tool.execute(parsedArguments);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2061,15 +1982,6 @@ async function executeShellInput(raw: string, visibility: ShellVisibility) {
     return;
   }
 
-  const shell =
-    process.platform === "win32"
-      ? process.env.ComSpec || "cmd.exe"
-      : process.env.SHELL || "/bin/sh";
-  const shellArgs =
-    process.platform === "win32"
-      ? ["/d", "/s", "/c", command]
-      : ["-lc", command];
-  const cwd = WORKSPACE_ROOT;
   const cwdLabel = ".";
 
   let stdout = "";
@@ -2151,69 +2063,22 @@ async function executeShellInput(raw: string, visibility: ShellVisibility) {
   renderer.requestRender();
 
   try {
-    shellResult = await new Promise<ShellExecutionResult>((resolve) => {
-      let child: ChildProcess;
-
-      try {
-        child = spawn(shell, shellArgs, {
-          cwd,
-          stdio: ["ignore", "pipe", "pipe"],
-          env: process.env,
-        });
-      } catch (error) {
-        resolve({
-          stdout,
-          stderr,
-          exitCode: null,
-          signal: null,
-          startupError: error instanceof Error ? error.message : String(error),
-          stdoutTruncated,
-          stderrTruncated,
-        });
-        return;
-      }
-
-      activeShellProcess = child;
-
-      child.stdout?.setEncoding("utf8");
-      child.stdout?.on("data", (chunk: string) => {
-        const next = appendChunkWithLimit(stdout, chunk);
-        stdout = next.value;
-        stdoutTruncated ||= next.truncated;
-        refreshEntry(true);
-      });
-
-      child.stderr?.setEncoding("utf8");
-      child.stderr?.on("data", (chunk: string) => {
-        const next = appendChunkWithLimit(stderr, chunk);
-        stderr = next.value;
-        stderrTruncated ||= next.truncated;
-        refreshEntry(true);
-      });
-
-      child.on("error", (error) => {
-        resolve({
-          stdout,
-          stderr,
-          exitCode: null,
-          signal: null,
-          startupError: error instanceof Error ? error.message : String(error),
-          stdoutTruncated,
-          stderrTruncated,
-        });
-      });
-
-      child.on("close", (exitCode, signal) => {
-        resolve({
-          stdout,
-          stderr,
-          exitCode,
-          signal,
-          startupError: null,
-          stdoutTruncated,
-          stderrTruncated,
-        });
-      });
+    shellResult = await runShellCommandSession({
+      command,
+      onProcessStart: (child) => {
+        activeShellProcess = child;
+      },
+      onProcessEnd: () => {
+        activeShellProcess = null;
+      },
+      onUpdate: (state) => {
+        stdout = state.stdout;
+        stderr = state.stderr;
+        stdoutTruncated = state.stdoutTruncated;
+        stderrTruncated = state.stderrTruncated;
+        shellResult = state.result;
+        refreshEntry(state.running);
+      },
     });
 
     stdout = shellResult.stdout;
