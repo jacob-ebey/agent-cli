@@ -5,12 +5,15 @@
   "description": "Terminal-based agentic coding assistant with syntax highlighting.",
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "format:file": "prettier --write"
   },
   "packageManager": "pnpm@10.12.1",
   "devDependencies": {
     "@types/node": "^24.0.13",
     "bun-types": "latest",
+    "prettier": "^3.8.1",
     "typescript": "^5.8.3"
   },
   "dependencies": {

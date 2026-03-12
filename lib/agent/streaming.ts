@@ -1,3 +1,5 @@
+import { TextRenderable } from "@opentui/core";
+
 import type { Message, ResponseChunk, Tool } from "../llm.ts";
 import { streamResponse } from "../llm.ts";
 import type {
@@ -16,6 +18,7 @@ import {
 export function createAssistantStreamState(): AssistantStreamState {
   return {
     entry: null,
+    textBody: null,
     content: "",
     transcriptIndex: null,
     sawOutput: false,
@@ -37,20 +40,26 @@ export function ensureAssistantStreamEntry({
     options: { recordInTranscript: false; insertBeforeEntryId?: string }
   ) => ChatEntry;
   transcriptHistory: PersistedTranscriptEntry[];
-}) {
+}): ChatEntry {
   if (state.entry) {
-    return;
+    return state.entry;
   }
 
-  state.entry = appendEntry("assistant", "", {
+  const entry = appendEntry("assistant", "", {
     recordInTranscript: false,
     insertBeforeEntryId: state.insertAfterEntryId ?? undefined,
   });
+  state.entry = entry;
+  if (entry.renderKind !== "text") {
+    throw new Error("Assistant stream entry body must be text renderable.");
+  }
+  state.textBody = entry.body as TextRenderable;
   state.transcriptIndex =
     transcriptHistory.push({
       role: "assistant",
       content: "",
     }) - 1;
+  return entry;
 }
 
 export function appendAssistantStreamContent({
@@ -65,7 +74,7 @@ export function appendAssistantStreamContent({
   state: AssistantStreamState;
   contentChunk: string;
   transcriptHistory: PersistedTranscriptEntry[];
-  ensureEntry: () => void;
+  ensureEntry: () => ChatEntry;
   stopThinkingIndicator: () => void;
   requestRender: () => void;
   scrollToBottom: () => void;
@@ -73,7 +82,10 @@ export function appendAssistantStreamContent({
   stopThinkingIndicator();
   ensureEntry();
   state.content += contentChunk;
-  state.entry!.body.content = state.content || " ";
+  if (!state.textBody) {
+    throw new Error("Assistant stream entry body must be text renderable while streaming.");
+  }
+  state.textBody.content = state.content || " ";
   if (state.transcriptIndex !== null) {
     transcriptHistory[state.transcriptIndex] = {
       role: "assistant",
@@ -105,8 +117,8 @@ export async function handleResponseChunk({
   stopThinkingIndicator: () => void;
   updateSidebar: (note: string) => void;
   sendStreamStateEvent: (event: StreamStateMachineEvent) => void;
-  appendAssistantContent: (contentChunk: string) => void;
-  appendSystemMessage: (content: string) => string;
+  appendAssistantContent: (contentChunk: string) => Promise<void>;
+  appendSystemMessage: (content: string) => Promise<string>;
   summarizeToolResult: (toolName: string, input: unknown, output: unknown) => string | null;
   refreshUpmergeState: () => Promise<void>;
 }) {
@@ -120,7 +132,7 @@ export async function handleResponseChunk({
       break;
     case "content":
       sendStreamStateEvent("receive-content");
-      appendAssistantContent(chunk.content);
+      await appendAssistantContent(chunk.content);
       break;
     case "tool-call-start":
       state.sawToolActivity = true;
@@ -137,7 +149,7 @@ export async function handleResponseChunk({
     case "tool-result": {
       state.sawToolActivity = true;
       stopThinkingIndicator();
-      const systemEntryId = appendSystemMessage(
+      const systemEntryId = await appendSystemMessage(
         summarizeToolResult(chunk.toolName, chunk.input, chunk.output) ??
           [`Tool \`${chunk.toolName}\` completed.`, "", formatToolOutput(chunk.output)].join(
             "\n"

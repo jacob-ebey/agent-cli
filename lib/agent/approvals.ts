@@ -11,6 +11,30 @@ import type {
 } from "./types.ts";
 import { readStringArgument } from "./utils.ts";
 
+export function matchesApprovedShellCommandPattern(
+  approvedCommand: string,
+  requestedCommand: string
+) {
+  if (approvedCommand.endsWith("*")) {
+    return requestedCommand.startsWith(approvedCommand.slice(0, -1));
+  }
+
+  return approvedCommand === requestedCommand;
+}
+
+function hasApprovedShellCommand(
+  approvedCommands: Set<string>,
+  requestedCommand: string
+) {
+  for (const approvedCommand of approvedCommands) {
+    if (matchesApprovedShellCommandPattern(approvedCommand, requestedCommand)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export async function getApprovalTarget(
   toolName: string,
   tool: LoadedTool,
@@ -79,7 +103,7 @@ export async function ensureToolApproval(
 
   if (
     target.approvalPersistence === "persisted" &&
-    options.approvedShellCommands.has(target.approvalKey)
+    hasApprovedShellCommand(options.approvedShellCommands, target.approvalKey)
   ) {
     return;
   }
@@ -104,7 +128,7 @@ export async function ensureToolApproval(
 
 export function currentApprovalPrompt(request: PendingApproval) {
   return request.approvalPersistence === "persisted"
-    ? "Press `y` to approve this command once, `a` to always approve this exact command, or `n` to deny."
+    ? "Press `y` to approve this command once, `a` to always approve this command or a trailing-`*` prefix pattern, or `n` to deny."
     : "Press `y` to approve edits to this file for the rest of the session, or `n` to deny.";
 }
 
@@ -116,7 +140,7 @@ export function isApprovalAlreadyGranted(
   }
 ) {
   return request.approvalPersistence === "persisted"
-    ? approvals.approvedShellCommands.has(request.approvalKey)
+    ? hasApprovedShellCommand(approvals.approvedShellCommands, request.approvalKey)
     : approvals.approvedEditTargets.has(request.approvalKey);
 }
 

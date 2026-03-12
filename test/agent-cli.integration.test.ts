@@ -89,6 +89,51 @@ test("agent entrypoint imports its local modules and keeps the quit command wire
   expect(source).toMatch(/renderer\.destroy\(\)/);
 });
 
+test("persisted shell approvals ignore invalid wildcard placements", async () => {
+  const workspaceRoot = await fs.mkdtemp(
+    path.join(await fs.realpath(os.tmpdir()), "agent-cli-shell-approvals-")
+  );
+  tempDirs.push(workspaceRoot);
+  await fs.mkdir(path.join(workspaceRoot, ".agents"), { recursive: true });
+  await fs.writeFile(
+    path.join(workspaceRoot, ".agents", "shell.json"),
+    `${JSON.stringify(
+      {
+        approvedCommands: [
+          "bun test*",
+          "bun typecheck",
+          "*bun test",
+          "bun*test",
+          "bun**",
+          ""
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  const source = await fs.readFile(path.join(repoRoot, "lib", "agent", "config-store.ts"), "utf8");
+  const parseMatch = source.match(
+    /function parsePersistedShellCommand\(value: unknown\) \{([\s\S]*?)\n\}/
+  );
+  expect(parseMatch).not.toBeNull();
+
+  const parsePersistedShellCommand = new Function(
+    "value",
+    `${parseMatch![1]}\n`
+  ) as (value: unknown) => string | null;
+
+  const parsedCommands = JSON.parse(
+    await fs.readFile(path.join(workspaceRoot, ".agents", "shell.json"), "utf8")
+  ).approvedCommands
+    .map((entry: unknown) => parsePersistedShellCommand(entry))
+    .filter((entry: string | null): entry is string => entry !== null);
+
+  expect(parsedCommands).toEqual(["bun test*", "bun typecheck"]);
+});
+
 test("merge source into worktree works on a clean repo after upstream advances", async () => {
   const repoPath = await createTempGitRepo({
     "notes.txt": ["start", "shared", "end", ""].join("\n"),

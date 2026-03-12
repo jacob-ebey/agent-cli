@@ -1,6 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 
-import type { BoxRenderable, TextRenderable } from "@opentui/core";
+import type { BoxRenderable, CodeRenderable, DiffRenderable, TextRenderable } from "@opentui/core";
 
 import type { Message, Tool } from "../llm.ts";
 import type { PersistedWorkspaceSession } from "../../worktree.ts";
@@ -12,11 +12,14 @@ export type ConversationMessage = Message & {
   localOnly?: boolean;
 };
 
+export type ChatEntryRenderKind = "text" | "code" | "diff";
+
 export type ChatEntry = {
   id: string;
   role: ChatRole;
   container: BoxRenderable;
-  body: TextRenderable;
+  body: TextRenderable | CodeRenderable | DiffRenderable;
+  renderKind: ChatEntryRenderKind;
 };
 
 export type ToolExecutor = (
@@ -177,6 +180,7 @@ export type ShellMessageState = {
 
 export type AssistantStreamState = {
   entry: ChatEntry | null;
+  textBody: TextRenderable | null;
   content: string;
   transcriptIndex: number | null;
   sawOutput: boolean;

@@ -593,27 +593,30 @@ async function getCurrentBranchRef(cwd: string) {
   return currentBranch === "HEAD" ? "HEAD" : `origin/${currentBranch}`;
 }
 
-async function buildConversationContextForConflictResolution(conversationId: string | null) {
+async function buildConversationMessagesForConflictResolution(conversationId: string | null) {
   if (!conversationId) {
-    return "No conversation history was available for this worktree session.";
+    return [] as Message[];
   }
 
   const history = await loadConversationHistory();
   const conversation = history.find((entry) => entry.id === conversationId) ?? null;
   if (!conversation) {
-    return `Conversation history for session ${conversationId} was not found.`;
+    return [] as Message[];
   }
 
-  const transcript = conversation.transcript
-    .filter((entry) => entry.role === "user" || entry.role === "assistant" || entry.role === "error")
-    .slice(-30)
-    .map((entry) => {
-      const label = entry.role.toUpperCase();
-      return `[${label}]\n${entry.content}`;
-    })
-    .join("\n\n");
+  return conversation.transcript
+    .flatMap((entry) => {
+      if (entry.role === "user") {
+        return [{ role: "user", content: entry.content } satisfies Message];
+      }
 
-  return transcript || "Conversation history existed but did not contain user/assistant transcript entries.";
+      if (entry.role === "assistant") {
+        return [{ role: "assistant", content: entry.content } satisfies Message];
+      }
+
+      return [] as Message[];
+    })
+    .slice(-30);
 }
 
 function buildPublishConflictResolutionPrompt(options: {
@@ -623,19 +626,15 @@ function buildPublishConflictResolutionPrompt(options: {
   baseText: string;
   worktreeText: string;
   mainText: string;
-  conversationContext: string;
 }) {
   return [
-    `You are resolving an upmerge conflict for ${options.relativePath}.`,
-    `The conflict happened while publishing agent worktree changes after syncing with ${options.sourceRef}.`,
-    "Use the conversation history to infer user intent and prefer the result that best satisfies the active task.",
+    `Resolve the git upmerge conflict for ${options.relativePath}.`,
+    `This conflict happened while publishing agent worktree changes after syncing with ${options.sourceRef}.`,
+    "Use the existing conversation context to infer the user's active intent.",
+    "This is a diff-resolution task, not an exploration task.",
+    "Do not call tools. Do not ask follow-up questions. Make the best single-pass resolution from the provided context.",
     "Return only the final resolved file contents with no markdown fences, commentary, or explanation.",
-    "Preserve valid syntax and combine both sides when appropriate.",
-    "",
-    "Conversation history:",
-    "<<<CONVERSATION>>>",
-    options.conversationContext,
-    "<<<END CONVERSATION>>>",
+    "Preserve valid syntax, keep behavior aligned with the user's requested change, and integrate non-conflicting changes from both sides when appropriate.",
     "",
     "Baseline before either side changed:",
     "<<<BASE>>>",
@@ -1698,11 +1697,11 @@ async function autoResolvePublishConflict(options: {
     return `Cannot auto-resolve ${options.relativePath}: the worktree file no longer contains conflict markers.`;
   }
 
-  const [baseText, worktreeText, mainText, conversationContext] = await Promise.all([
+  const [baseText, worktreeText, mainText, conversationMessages] = await Promise.all([
     Promise.resolve(baseline.content?.toString("utf8") ?? ""),
     readConflictStageBlob(options.relativePath, 2),
     readConflictStageBlob(options.relativePath, 3),
-    buildConversationContextForConflictResolution(sessionState.conversationId),
+    buildConversationMessagesForConflictResolution(sessionState.conversationId),
   ]);
 
   const prompt = buildPublishConflictResolutionPrompt({
@@ -1712,12 +1711,14 @@ async function autoResolvePublishConflict(options: {
     baseText,
     worktreeText: worktreeText ?? "",
     mainText: mainText ?? main.content?.toString("utf8") ?? "",
-    conversationContext,
   });
 
   const resolvedText = await generateTextResponse({
     model: options.model,
-    messages: [{ role: "user", content: prompt } satisfies Message],
+    messages: [
+      ...conversationMessages,
+      { role: "user", content: prompt } satisfies Message,
+    ],
     abortSignal: options.abortSignal,
   });
 

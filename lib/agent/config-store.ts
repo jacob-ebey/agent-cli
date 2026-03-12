@@ -15,7 +15,21 @@ function parsePersistedModel(value: unknown) {
 }
 
 function parsePersistedShellCommand(value: unknown) {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const command = value.trim();
+  if (!command) {
+    return null;
+  }
+
+  const wildcardCount = [...command].filter((character) => character === "*").length;
+  if (wildcardCount === 0) {
+    return command;
+  }
+
+  return wildcardCount === 1 && command.endsWith("*") ? command : null;
 }
 
 export async function loadPersistedConfig(): Promise<PersistedConfig> {
@@ -148,7 +162,7 @@ async function loadShellApprovalGuidance() {
     return [
       "Additional shell approval guidance:",
       "",
-      "- If workspace `.agents/shell.json` defines any approved shell commands, they are included in this prompt and may be used without asking again.",
+      "- If workspace `.agents/shell.json` defines any approved shell commands, they are included in this prompt and may be used without asking again. A command ending with `*` is treated as a prefix pattern.",
       "- Any additional shell commands may still require user approval, so use them sparingly and only when necessary.",
     ].join("\n");
   }
@@ -156,7 +170,7 @@ async function loadShellApprovalGuidance() {
   return [
     "Additional shell approval guidance from workspace `.agents/shell.json`:",
     "",
-    "- The following shell commands are already approved and may be used without asking again:",
+    "- The following shell commands are already approved and may be used without asking again. Entries ending with `*` match any command with that prefix:",
     ...approvedCommands.map((command) => `  - \`${command}\``),
     "- Any additional shell commands may still require user approval, so use them sparingly and only when necessary.",
   ].join("\n");

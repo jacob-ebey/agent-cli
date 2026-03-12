@@ -44,6 +44,7 @@ export function appendTranscriptEntry(options: {
   nextId: (prefix: string) => string;
   role: ChatRole;
   content: string;
+  explicitLanguage?: string | null;
   recordInTranscript?: boolean;
   insertBeforeEntryId?: string;
   onEntryAdded?: () => void;
@@ -73,6 +74,7 @@ export function appendTranscriptEntry(options: {
     role: options.role,
     container,
     body,
+    renderKind: "text",
   };
 
   if (options.insertBeforeEntryId) {
@@ -117,7 +119,7 @@ export function restoreTranscriptEntries(options: {
   transcript: ScrollBoxRenderable;
   entries: ChatEntry[];
   transcriptHistory: PersistedTranscriptEntry[];
-  appendEntry: (role: ChatRole, content: string, recordInTranscript: boolean) => void;
+  appendEntry: (role: ChatRole, content: string, recordInTranscript: boolean) => ChatEntry;
   onRestored?: () => void;
 }) {
   clearTranscriptEntries({

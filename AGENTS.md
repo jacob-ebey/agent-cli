@@ -15,7 +15,9 @@
 - Start the app: `bun run agent.ts`
 - Typecheck: `bun typecheck`
 - Tests: `bun test`
-- There are no declared build or lint scripts in `package.json`; `bun typecheck` is the main scripted validation command.
+- Format the whole repo: `bun run format`
+- Format specific files: `bun run format:file -- <paths...>`
+- After making code changes, run formatting when needed, then run `bun typecheck`.
 
 ## Repo Map
 
@@ -67,8 +69,9 @@
   - `worktree.ts` hard-codes it in `UPMERGE_IGNORED_PATHS`.
 - The `:agents-md` flow is read-only until final writeback.
   - `commands.ts` restricts the sub-agent to discovery tools plus `create_agents_context`, then writes the returned markdown to `AGENTS.md`.
-- Shell approval persistence is exact-string based.
-  - Small command text changes do not match previously approved commands.
+- Shell approval persistence supports exact strings and trailing-`*` prefix patterns.
+  - For example, `bun test*` matches both `bun test` and targeted invocations such as `bun test test/event-stream-decoder.test.ts`.
+  - Other wildcard placements are invalid and ignored when loading `.agents/shell.json`.
 
 ## Preferred Patterns
 

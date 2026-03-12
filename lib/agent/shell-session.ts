@@ -1,3 +1,5 @@
+import { TextRenderable } from "@opentui/core";
+
 import type { ChatEntry } from "./types.ts";
 import type {
   PersistedTranscriptEntry,
@@ -115,6 +117,10 @@ export function createShellTranscriptEntry({
   const entry = appendEntry("system", formatShellMessage(initialState), {
     recordInTranscript: false,
   });
+  if (entry.renderKind !== "text") {
+    throw new Error("Shell transcript entry body must be text renderable.");
+  }
+  const textBody = entry.body as TextRenderable;
 
   return {
     update(result: ShellExecutionResult, running: boolean) {
@@ -122,7 +128,7 @@ export function createShellTranscriptEntry({
       const content = formatShellMessage(
         createShellMessageState(command, visibility, shellResult, running)
       );
-      entry.body.content = content || " ";
+      textBody.content = content || " ";
       transcriptHistory[transcriptIndex] = {
         role: "system",
         content,

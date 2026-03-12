@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 
 import {
   applyConstraintUpdates,
@@ -10,6 +12,7 @@ import {
   recordSuccessfulEdit,
   recordSuccessfulShellCommand,
 } from "../lib/agent/constraints.ts";
+import { matchesApprovedShellCommandPattern } from "../lib/agent/approvals.ts";
 import { buildCritiquePrompt, buildReviewPrompt } from "../lib/agent/commands.ts";
 
 import type { ResponseChunk, Message } from "../lib/llm.ts";
@@ -163,6 +166,19 @@ test("matchOutputLabel returns the labeled value", () => {
   expect(matchOutputLabel(output, "Missing")).toBeNull();
 });
 
+test("shell approval patterns support exact and trailing wildcard matches", () => {
+  expect(matchesApprovedShellCommandPattern("bun typecheck", "bun typecheck")).toBe(true);
+  expect(matchesApprovedShellCommandPattern("bun typecheck", "bun typecheck --watch")).toBe(false);
+  expect(matchesApprovedShellCommandPattern("bun test*", "bun test")).toBe(true);
+  expect(
+    matchesApprovedShellCommandPattern(
+      "bun test*",
+      "bun test test/event-stream-decoder.test.ts"
+    )
+  ).toBe(true);
+  expect(matchesApprovedShellCommandPattern("bun test*", "bunx test")).toBe(false);
+});
+
 test("extractTextParts and extractAssistantText ignore non-text content", () => {
   const content: NonNullable<Message["content"]> = [
     { type: "text", text: "hello" },
@@ -256,8 +272,8 @@ test("stream phase leaves connecting on first tool activity", async () => {
     stopThinkingIndicator: () => {},
     updateSidebar: () => {},
     sendStreamStateEvent,
-    appendAssistantContent: () => {},
-    appendSystemMessage: () => "system-1",
+    appendAssistantContent: async () => {},
+    appendSystemMessage: async () => "system-1",
     summarizeToolResult: () => null,
     refreshUpmergeState: async () => {},
   });
@@ -284,11 +300,19 @@ test("stream phase leaves connecting on tool input deltas", async () => {
     sendStreamStateEvent: (event) => {
       streamPhase = applyStreamStateEvent(streamPhase, event);
     },
-    appendAssistantContent: () => {},
-    appendSystemMessage: () => "system-1",
+    appendAssistantContent: async () => {},
+    appendSystemMessage: async () => "system-1",
     summarizeToolResult: () => null,
     refreshUpmergeState: async () => {},
   });
 
   expect(streamPhase as StreamPhase).toBe("reasoning");
+});
+
+test("upmerge conflict previews stay on the text renderer path", async () => {
+  const source = await fs.readFile(path.join(process.cwd(), "agent.ts"), "utf8");
+  expect(source).toContain('!preview.startsWith("Text upmerge conflict: ")');
+  expect(source).toContain('!preview.startsWith("Text worktree merge conflict: ")');
+  expect(source).toContain('!preview.startsWith("Binary upmerge conflict: ")');
+  expect(source).toContain('!preview.startsWith("Binary worktree merge conflict: ")');
 });

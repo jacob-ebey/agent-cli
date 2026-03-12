@@ -10,8 +10,13 @@ function createApprovalSidebarViewModel(
   state: SidebarPresentationState,
   note: string
 ): SidebarViewModel {
+  const activeApproval = state.activeApproval;
+  if (!activeApproval) {
+    return createSessionSidebarViewModel(state, note);
+  }
+
   const approvalShortcuts =
-    state.activeApproval?.approvalPersistence === "persisted"
+    activeApproval.approvalPersistence === "persisted"
       ? [
           "y      approve once",
           "a      always approve this command",
@@ -24,8 +29,8 @@ function createApprovalSidebarViewModel(
     borderColor: "#f59e0b",
     content: [
       "Status: waiting",
-      `Tool: ${state.activeApproval!.toolName}`,
-      `${state.activeApproval!.displayLabel}: ${state.activeApproval!.displayValue}`,
+      `Tool: ${activeApproval.toolName}`,
+      `${activeApproval.displayLabel}: ${activeApproval.displayValue}`,
       `Queued: ${numberFormatter.format(state.queuedApprovalsCount)}`,
       "",
       "Shortcuts",
@@ -181,7 +186,7 @@ export function createSidebarViewModel(
 export function createComposerHintContent(state: SidebarPresentationState) {
   if (state.activeApproval) {
     return state.activeApproval.approvalPersistence === "persisted"
-      ? `Approval required. Press y to allow this command once, a to always allow this exact command, or n to deny.${
+      ? `Approval required. Press y to allow this command once, a to always allow this command or a trailing-* prefix pattern, or n to deny.${
           state.queuedApprovalsCount
             ? ` ${state.queuedApprovalsCount} more approval request(s) are queued.`
             : ""

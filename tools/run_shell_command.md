@@ -42,7 +42,8 @@ Run an arbitrary shell command inside the agent worktree and return its stdout, 
 
 - Every command requires user approval before it runs.
 - Users can approve a command once or always.
-- Always-approved commands are stored in `.agents/shell.json` using the exact command string.
+- Always-approved commands are stored in `.agents/shell.json`.
+- Entries may be exact command strings or trailing-`*` prefix patterns such as `bun test*`.
 - Commands always run from the agent-managed worktree when one is available for the current git workspace.
 - `cwd` must stay within the current worktree workspace root.
 - Commands run through the user's shell when available, or a platform fallback shell otherwise.

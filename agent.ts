@@ -612,8 +612,18 @@ function selectedUpmergePreviewLanguage() {
   return inferLanguageFromPath(selected?.path ?? null) ?? undefined;
 }
 
+function shouldRenderUpmergePreviewAsDiff(preview: string) {
+  return (
+    isDiffLikeContent(preview) &&
+    !preview.startsWith("Text upmerge conflict: ") &&
+    !preview.startsWith("Text worktree merge conflict: ") &&
+    !preview.startsWith("Binary upmerge conflict: ") &&
+    !preview.startsWith("Binary worktree merge conflict: ")
+  );
+}
+
 function setUpmergePreviewContent(preview: string) {
-  if (isDiffLikeContent(preview)) {
+  if (shouldRenderUpmergePreviewAsDiff(preview)) {
     try {
       upmergePreview.remove(upmergePreviewText.id);
     } catch {}
@@ -1157,7 +1167,7 @@ function updateComposerHint() {
   composerHint.content = createComposerHintContent(buildSidebarPresentationState());
 }
 
-async function appendEntry(
+function appendEntry(
   role: ChatRole,
   content: string,
   options: {
@@ -1166,7 +1176,7 @@ async function appendEntry(
     explicitLanguage?: string | null;
   } = {}
 ) {
-  return await appendTranscriptEntry({
+  return appendTranscriptEntry({
     renderer,
     transcript,
     entries,
@@ -1232,8 +1242,8 @@ async function restoreTranscriptFromHistory() {
     transcript,
     entries,
     transcriptHistory,
-    appendEntry: async (role, content, recordInTranscript) => {
-      await appendEntry(role, content, { recordInTranscript });
+    appendEntry: (role, content, recordInTranscript) => {
+      return appendEntry(role, content, { recordInTranscript });
     },
     onRestored: () => {
       updateSidebar();
@@ -1648,11 +1658,17 @@ async function executeShellInput(raw: string, visibility: ShellVisibility) {
   }
 
   let shellResult = createInitialShellExecutionResult();
-  const shellEntry = await createShellTranscriptEntry({
+  const shellEntry = createShellTranscriptEntry({
     command,
     visibility,
     transcriptHistory,
-    appendEntry: (role, content, options) => appendEntry(role, content, options),
+    appendEntry: (role, content, options) => {
+      const entry = appendEntry(role, content, options);
+      if (entry instanceof Promise) {
+        throw new Error("appendEntry must return synchronously for shell transcript entries.");
+      }
+      return entry;
+    },
     requestRender: () => renderer.requestRender(),
     scrollToBottom: () => scrollToBottom(),
   });
@@ -1738,11 +1754,18 @@ async function runAgentLoop() {
                 state,
                 contentChunk,
                 transcriptHistory,
-                ensureEntry: async () =>
-                  await ensureAssistantStreamEntry({
+                ensureEntry: () =>
+                  ensureAssistantStreamEntry({
                     state,
-                    appendEntry: (role, content, options) =>
-                      appendEntry(role, content, options),
+                    appendEntry: (role, content, options) => {
+                      const entry = appendEntry(role, content, options);
+                      if (entry instanceof Promise) {
+                        throw new Error(
+                          "appendEntry must return synchronously for assistant streaming entries."
+                        );
+                      }
+                      return entry;
+                    },
                     transcriptHistory,
                   }),
                 stopThinkingIndicator,
@@ -1755,11 +1778,11 @@ async function runAgentLoop() {
           }),
         onResponseMessages: async (responseMessages, state) => {
           latestTotalTokensUsed = state.totalTokensUsed;
-          await applyFinalAssistantTextIfNeeded({
+          applyFinalAssistantTextIfNeeded({
             state,
             responseMessages,
-            appendEntry: async (role, content) => {
-              await appendEntry(role, content, {
+            appendEntry: (role, content) => {
+              appendEntry(role, content, {
                 insertBeforeEntryId: state.insertAfterEntryId ?? undefined,
               });
             },
