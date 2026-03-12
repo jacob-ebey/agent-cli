@@ -133,10 +133,18 @@ export function assistantMessageContainsToolCall(message: Message) {
 }
 
 export function lastAssistantResponseContainsToolCall(messages: Message[]) {
+  let sawToolMessageAfterAssistant = false;
+
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
+
+    if (message.role === "tool") {
+      sawToolMessageAfterAssistant = true;
+      continue;
+    }
+
     if (message.role === "assistant") {
-      return assistantMessageContainsToolCall(message);
+      return assistantMessageContainsToolCall(message) || sawToolMessageAfterAssistant;
     }
   }
 

@@ -60,6 +60,8 @@
 - `tools/system-prompt.md` is excluded from tool loading and used only as prompt text.
 - `agent.ts` always calls `ensurePlanFileReady()` during startup.
   - This creates `.agents/PLAN.md` if missing.
+- The base system prompt now treats `.agents/PLAN.md` as the home for lightweight reflection on complex work.
+  - For ambiguous or higher-risk tasks, expect the agent to outline a plan, note acceptance criteria, and capture knowledge gaps before editing.
 - Initial tool context is seeded automatically.
   - `lib/agent/constants.ts` seeds `list_project_tree` and `read_file package.json` for normal sessions.
   - The AGENTS flow additionally seeds `read_file AGENTS.md`.
@@ -84,6 +86,9 @@
   - UI, approvals, persistence, shell execution, streaming, commands, and summaries are already separated.
 - Treat root `AGENTS.md` as additive guidance, not a replacement for `tools/system-prompt.md`.
 - Keep generated workspace state in existing machine-managed locations rather than inventing new files/dirs.
+- For ambiguous edit requests, prefer clarifying questions or explicit, testable acceptance criteria before changing code.
+- For front-end or visual tasks, prefer `agent_web_browser`; ask for a runnable URL when needed and ask the user to verify visuals you cannot inspect directly.
+- After meaningful refactors or interface changes, consider whether README/comments/agent guidance should be updated in the same change.
 - Prefer Bun for local scripts and validation, even though `packageManager` is `pnpm@10.12.1` in `package.json`.
 
 ## Environment / Services

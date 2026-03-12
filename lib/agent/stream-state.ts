@@ -18,9 +18,9 @@ export function reduceStreamPhase(
     case "start-connection":
       return "connecting";
     case "connection-established":
-      return "reasoning";
+      return currentPhase === "responding" ? "responding" : "reasoning";
     case "receive-reasoning":
-      return "reasoning";
+      return currentPhase === "responding" ? "responding" : "reasoning";
     case "receive-content":
       return "responding";
     case "await-approval":

@@ -309,6 +309,34 @@ test("stream phase leaves connecting on tool input deltas", async () => {
   expect(streamPhase as StreamPhase).toBe("reasoning");
 });
 
+test("stream phase stays responding when reasoning arrives after content", () => {
+  let streamPhase: StreamPhase = "connecting";
+
+  streamPhase = applyStreamStateEvent(streamPhase, "connection-established");
+  streamPhase = applyStreamStateEvent(streamPhase, "receive-content");
+  streamPhase = applyStreamStateEvent(streamPhase, "receive-reasoning");
+
+  expect(streamPhase as StreamPhase).toBe("responding");
+});
+
+test("stream phase stays responding when connection-established repeats after content", () => {
+  let streamPhase: StreamPhase = "connecting";
+
+  streamPhase = applyStreamStateEvent(streamPhase, "receive-content");
+  streamPhase = applyStreamStateEvent(streamPhase, "connection-established");
+
+  expect(streamPhase as StreamPhase).toBe("responding");
+});
+
+test("approval resolution restores reasoning before any content", () => {
+  let streamPhase: StreamPhase = "connecting";
+
+  streamPhase = applyStreamStateEvent(streamPhase, "await-approval");
+  streamPhase = applyStreamStateEvent(streamPhase, "approval-resolved");
+
+  expect(streamPhase as StreamPhase).toBe("reasoning");
+});
+
 test("upmerge conflict previews stay on the text renderer path", async () => {
   const source = await fs.readFile(path.join(process.cwd(), "agent.ts"), "utf8");
   expect(source).toContain('!preview.startsWith("Text upmerge conflict: ")');
