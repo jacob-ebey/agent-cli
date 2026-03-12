@@ -51,6 +51,21 @@ export async function getApprovalTarget(
     }
   }
 
+  if (toolName === "remove_file") {
+    const requestedPath = readStringArgument(argumentsObject, "path");
+    if (!requestedPath) {
+      return null;
+    }
+
+    const originalPath = resolveOriginalWorkspacePath(requestedPath);
+    return {
+      approvalKey: `${toolName}:${originalPath}:${Date.now()}:${Math.random()}`,
+      displayLabel: "File deletion",
+      displayValue: relativeOriginalWorkspacePath(originalPath),
+      approvalPersistence: "session",
+    };
+  }
+
   if (tool.metadata.approvalScope === "command") {
     const command = readStringArgument(argumentsObject, "command");
     if (!command) {
