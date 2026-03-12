@@ -86,14 +86,15 @@ const openAIBase = process.env.OPENAI_API_BASE?.trim() || null;
 const openAIKey = process.env.OPENAI_API_KEY?.trim() || null;
 const ollamaBase = process.env.OLLAMA_API_BASE;
 const DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small";
+const DEFAULT_OLLAMA_EMBEDDING_MODEL = "nomic-embed-text";
 const DEFAULT_OLLAMA_BASE = "http://127.0.0.1:11434";
 const OPENAI_COMPATIBLE_MODELS_PATH = "/models";
 const OLLAMA_TAGS_PATH = "/api/tags";
 
-const shopifyGateway =
+const llmGateway =
   openAIBase && openAIKey
     ? createOpenAICompatible<string, never, string, never>({
-        name: "shopify-llm-gateway",
+        name: "llm-gateway",
         baseURL: normalizeOpenAIBaseURL(openAIBase),
         apiKey: openAIKey,
         includeUsage: true,
@@ -116,13 +117,13 @@ function describeConnectionFailure(error: unknown, action: string) {
 }
 
 function requireRemoteGateway() {
-  if (!shopifyGateway) {
+  if (!llmGateway) {
     throw new Error(
       "Remote model access is unavailable. Set OPENAI_API_BASE and OPENAI_API_KEY, or switch to an ollama:* model for offline/local use."
     );
   }
 
-  return shopifyGateway;
+  return llmGateway;
 }
 
 function isOllamaModel(model: string) {
@@ -142,13 +143,38 @@ function getChatModel(model: string) {
   return requireRemoteGateway().chatModel(model);
 }
 
-export function getEmbeddingModelId() {
+export type EmbeddingBackend = "openai-compatible" | "ollama";
+
+export type EmbeddingConfiguration = {
+  backend: EmbeddingBackend;
+  modelId: string;
+};
+
+export function getRemoteEmbeddingModelId() {
   return process.env.OPENAI_EMBEDDING_MODEL?.trim() || DEFAULT_EMBEDDING_MODEL;
+}
+
+export function getOllamaEmbeddingModelId() {
+  return process.env.OLLAMA_EMBEDDING_MODEL?.trim() || DEFAULT_OLLAMA_EMBEDDING_MODEL;
+}
+
+export function getPreferredEmbeddingConfiguration(): EmbeddingConfiguration {
+  if (llmGateway) {
+    return {
+      backend: "openai-compatible",
+      modelId: getRemoteEmbeddingModelId(),
+    };
+  }
+
+  return {
+    backend: "ollama",
+    modelId: getOllamaEmbeddingModelId(),
+  };
 }
 
 type AvailableModel = {
   id: string;
-  provider: "shopify" | "ollama";
+  provider: "llm-gateway" | "ollama";
   label: string;
   description: string;
 };
@@ -273,7 +299,7 @@ export async function listAvailableModels() {
         headers: {
           Authorization: `Bearer ${openAIKey}`,
         },
-        provider: "shopify",
+        provider: "llm-gateway",
       })
     );
   } else {
@@ -311,16 +337,21 @@ export async function listAvailableModels() {
   };
 }
 
-export async function embedValues(values: string[]) {
+export async function embedValues(
+  values: string[],
+  configuration: EmbeddingConfiguration = getPreferredEmbeddingConfiguration()
+) {
   if (!values.length) {
     return [] as number[][];
   }
 
-  const gateway = requireRemoteGateway();
-
   try {
+    const model =
+      configuration.backend === "openai-compatible"
+        ? requireRemoteGateway().embeddingModel(configuration.modelId)
+        : ollamaGateway.embeddingModel(configuration.modelId);
     const { embeddings } = await embedMany({
-      model: gateway.embeddingModel(getEmbeddingModelId()),
+      model,
       values,
     });
 
@@ -330,7 +361,13 @@ export async function embedValues(values: string[]) {
       throw error;
     }
 
-    throw new Error(describeConnectionFailure(error, "Embedding request"));
+    const backendLabel =
+      configuration.backend === "openai-compatible"
+        ? "OpenAI-compatible"
+        : "Ollama";
+    throw new Error(
+      `${backendLabel} embedding request failed for model ${configuration.modelId}: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
 }
 

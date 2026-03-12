@@ -2,9 +2,9 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
-import { embedValues, getEmbeddingModelId } from "./llm.ts";
+import { embedValues, getPreferredEmbeddingConfiguration } from "./llm.ts";
 
-const INDEX_VERSION = 2;
+const INDEX_VERSION = 3;
 const SKILLS_DIRECTORY = path.join(".agents", "skills");
 const SKILLS_INDEX_PATH = path.join(".agents", "skills-index.json");
 const MAX_CHUNK_CHARS = 900;
@@ -348,6 +348,8 @@ export async function loadSkillsIndex(workspaceRoot: string): Promise<SkillsInde
 }
 
 export async function indexSkills(workspaceRoot: string) {
+  const embeddingConfiguration = getPreferredEmbeddingConfiguration();
+
   const skillFiles = await listSkillFiles(workspaceRoot);
   if (!skillFiles.length) {
     throw new Error("No `.agents/skills/*/SKILL.md` files were found.");
@@ -375,7 +377,8 @@ export async function indexSkills(workspaceRoot: string) {
     embeddings = await embedValues(
       chunkInputs.map((chunk) =>
         [`Skill: ${chunk.name}`, `Section: ${chunk.section}`, chunk.content].join("\n")
-      )
+      ),
+      embeddingConfiguration
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -388,7 +391,7 @@ export async function indexSkills(workspaceRoot: string) {
     version: INDEX_VERSION,
     workspaceRoot,
     generatedAt: new Date().toISOString(),
-    embeddingModel: getEmbeddingModelId(),
+    embeddingModel: `${embeddingConfiguration.backend}:${embeddingConfiguration.modelId}`,
     chunks: chunkInputs.map((chunk, index) => ({
       ...chunk,
       embedding: embeddings[index] ?? [],

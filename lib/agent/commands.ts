@@ -306,7 +306,7 @@ export function describeModelOptions(currentModel: string) {
     "Presets",
     ...presetLines,
     "",
-    "You can also run `:model your-model-id` to set any Shopify gateway model directly.",
+    "You can also run `:model your-model-id` to set any OpenAI-compatible gateway model directly.",
     "Use `:model ollama:your-local-model` to target a local Ollama model.",
   ].join("\n");
 }

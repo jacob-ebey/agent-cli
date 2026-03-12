@@ -54,7 +54,7 @@ export type ModelMenuItem = {
   id: string;
   label: string;
   description: string;
-  provider: "shopify" | "ollama";
+  provider: "llm-gateway" | "ollama";
 };
 
 export type PendingApproval = {
