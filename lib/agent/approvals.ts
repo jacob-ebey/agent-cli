@@ -66,6 +66,23 @@ export async function getApprovalTarget(
     };
   }
 
+  if (toolName === "rename-file") {
+    const requestedFromPath = readStringArgument(argumentsObject, "from");
+    const requestedToPath = readStringArgument(argumentsObject, "to");
+    if (!requestedFromPath || !requestedToPath) {
+      return null;
+    }
+
+    const originalFromPath = resolveOriginalWorkspacePath(requestedFromPath);
+    const originalToPath = resolveOriginalWorkspacePath(requestedToPath);
+    return {
+      approvalKey: `${toolName}:${originalFromPath}:${originalToPath}:${Date.now()}:${Math.random()}`,
+      displayLabel: "File rename",
+      displayValue: `${relativeOriginalWorkspacePath(originalFromPath)} → ${relativeOriginalWorkspacePath(originalToPath)}`,
+      approvalPersistence: "session",
+    };
+  }
+
   if (tool.metadata.approvalScope === "command") {
     const command = readStringArgument(argumentsObject, "command");
     if (!command) {
