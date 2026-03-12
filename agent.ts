@@ -99,6 +99,12 @@ import {
   restoreTranscriptEntries,
 } from "./lib/agent/transcript-view.ts";
 import {
+  applySyntaxStyleToDiffRenderable,
+  inferLanguageFromPath,
+  isDiffLikeContent,
+  renderEntryBody,
+} from "./lib/agent/highlight.ts";
+import {
   createAssistantStreamState,
   ensureAssistantStreamEntry,
   appendAssistantStreamContent,
@@ -546,6 +552,7 @@ const {
   upmergePanel,
   upmergePreview,
   upmergePreviewText,
+  upmergePreviewDiff,
   historyPanel,
   historyPreview,
   historyPreviewText,
@@ -558,6 +565,7 @@ const {
 } = createAgentView(renderer);
 
 renderer.root.add(app);
+void applySyntaxStyleToDiffRenderable(upmergePreviewDiff);
 
 function setComposerText(value: string) {
   input.setText(value);
@@ -599,6 +607,32 @@ function setDraftForMode(currentMode: HistoryMode, value: string) {
 }
 
 
+function selectedUpmergePreviewLanguage() {
+  const selected = currentUpmergeItems(upmergeItems)[upmergeSelection] ?? null;
+  return inferLanguageFromPath(selected?.path ?? null) ?? undefined;
+}
+
+function setUpmergePreviewContent(preview: string) {
+  if (isDiffLikeContent(preview)) {
+    try {
+      upmergePreview.remove(upmergePreviewText.id);
+    } catch {}
+    if (!upmergePreview.getChildren().some((child) => child.id === upmergePreviewDiff.id)) {
+      upmergePreview.add(upmergePreviewDiff);
+    }
+    upmergePreviewDiff.filetype = selectedUpmergePreviewLanguage();
+    upmergePreviewDiff.diff = preview;
+  } else {
+    try {
+      upmergePreview.remove(upmergePreviewDiff.id);
+    } catch {}
+    if (!upmergePreview.getChildren().some((child) => child.id === upmergePreviewText.id)) {
+      upmergePreview.add(upmergePreviewText);
+    }
+    upmergePreviewText.content = preview;
+  }
+}
+
 async function refreshUpmergePreview() {
   const preview = await loadUpmergePreview({
     upmergeMenuOpen,
@@ -610,7 +644,7 @@ async function refreshUpmergePreview() {
     return;
   }
 
-  upmergePreviewText.content = preview;
+  setUpmergePreviewContent(preview);
   renderer.requestRender();
 }
 
@@ -625,7 +659,7 @@ async function refreshUpmergeState() {
   upmergeSelection = state.upmergeSelection;
 
   if (state.preview !== null) {
-    upmergePreviewText.content = state.preview;
+    setUpmergePreviewContent(state.preview);
   }
 
   updateSidebar();
@@ -708,7 +742,7 @@ async function runUpmergeSelection(
           : `Auto-resolving worktree merge conflict for ${selectedPath} with ${currentModel}...`
         : `Auto-resolving selected conflict with ${currentModel}...`;
       updateSidebar(statusMessage);
-      appendSystemMessage(statusMessage);
+      await appendSystemMessage(statusMessage);
       renderer.requestRender();
     }
 
@@ -733,13 +767,13 @@ async function runUpmergeSelection(
 
     if (action === "auto-resolve") {
       const selectedPath = selectedItem?.path;
-      appendSystemMessage(
+      await appendSystemMessage(
         selectedPath
           ? `Auto-resolve finished for ${selectedPath}.\n\n${result.message}`
           : `Auto-resolve finished.\n\n${result.message}`
       );
     } else {
-      appendSystemMessage(result.message);
+      await appendSystemMessage(result.message);
     }
     await refreshUpmergeState();
     return;
@@ -747,14 +781,14 @@ async function runUpmergeSelection(
     const message = error instanceof Error ? error.message : String(error);
     if (action === "auto-resolve") {
       const selectedPath = selectedItem?.path;
-      appendEntry(
+      await appendEntry(
         "error",
         selectedPath
           ? `Auto-resolve failed for ${selectedPath}.\n\n${message}`
           : `Auto-resolve failed.\n\n${message}`
       );
     } else {
-      appendEntry("error", message);
+      await appendEntry("error", message);
     }
   }
 
@@ -940,7 +974,7 @@ async function loadSelectedHistoryConversation() {
   }
 
   await archiveCurrentConversation();
-  replaceConversationState(selected);
+  await replaceConversationState(selected);
   await refreshHistoryState();
   insertDraft = "";
   commandDraft = "";
@@ -968,7 +1002,7 @@ async function deleteSelectedHistoryConversation() {
     updateSidebar(`Deleted conversation: ${selected.title}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    appendEntry("error", `Failed to delete saved conversation.\n\n${message}`);
+    await appendEntry("error", `Failed to delete saved conversation.\n\n${message}`);
     updateSidebar("Failed to delete saved conversation.");
   }
   renderer.requestRender();
@@ -1123,15 +1157,16 @@ function updateComposerHint() {
   composerHint.content = createComposerHintContent(buildSidebarPresentationState());
 }
 
-function appendEntry(
+async function appendEntry(
   role: ChatRole,
   content: string,
   options: {
     recordInTranscript?: boolean;
     insertBeforeEntryId?: string;
+    explicitLanguage?: string | null;
   } = {}
 ) {
-  return appendTranscriptEntry({
+  return await appendTranscriptEntry({
     renderer,
     transcript,
     entries,
@@ -1139,6 +1174,7 @@ function appendEntry(
     nextId,
     role,
     content,
+    explicitLanguage: options.explicitLanguage,
     recordInTranscript: options.recordInTranscript,
     insertBeforeEntryId: options.insertBeforeEntryId,
     onEntryAdded: () => {
@@ -1159,14 +1195,17 @@ function pushConversationMessage(
   );
 }
 
-function appendSystemMessage(
+async function appendSystemMessage(
   content: string,
   options: {
     localOnly?: boolean;
     recordInConversation?: boolean;
+    explicitLanguage?: string | null;
   } = {}
 ) {
-  const entry = appendEntry("system", content);
+  const entry = await appendEntry("system", content, {
+    explicitLanguage: options.explicitLanguage,
+  });
   if (options.recordInConversation !== false) {
     pushConversationMessage(
       {
@@ -1187,14 +1226,14 @@ function clearEntries() {
   });
 }
 
-function restoreTranscriptFromHistory() {
-  restoreTranscriptEntries({
+async function restoreTranscriptFromHistory() {
+  await restoreTranscriptEntries({
     rendererRequestRender: () => renderer.requestRender(),
     transcript,
     entries,
     transcriptHistory,
-    appendEntry: (role, content, recordInTranscript) => {
-      appendEntry(role, content, { recordInTranscript });
+    appendEntry: async (role, content, recordInTranscript) => {
+      await appendEntry(role, content, { recordInTranscript });
     },
     onRestored: () => {
       updateSidebar();
@@ -1203,7 +1242,7 @@ function restoreTranscriptFromHistory() {
   });
 }
 
-function replaceConversationState(state: PersistedConversationState) {
+async function replaceConversationState(state: PersistedConversationState) {
   activeConversationId = state.id;
   activeConversationCreatedAt = state.createdAt;
   latestTotalTokensUsed = null;
@@ -1216,7 +1255,7 @@ function replaceConversationState(state: PersistedConversationState) {
   clearApprovalQueue();
   approvedEditTargets.clear();
   autoScrollState = "follow";
-  restoreTranscriptFromHistory();
+  await restoreTranscriptFromHistory();
 }
 
 async function resetConversation() {
@@ -1225,7 +1264,7 @@ async function resetConversation() {
   clearApprovalQueue();
   approvedEditTargets.clear();
   const archived = await archiveCurrentConversation();
-  replaceConversationState(
+  await replaceConversationState(
     createInitialConversationState(createInitialConversationMessages())
   );
   insertDraft = "";
@@ -1255,12 +1294,12 @@ function exitCommandMode() {
 async function persistCurrentModelSelection() {
   try {
     await savePersistedConfig({ currentModel });
-    appendSystemMessage(
+    await appendSystemMessage(
       `Switched model to \`${currentModel}\`. Future sessions will reuse it.`
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    appendEntry(
+    await appendEntry(
       "error",
       `Switched model to \`${currentModel}\`, but failed to save it for future sessions.\n\n${message}`
     );
@@ -1374,7 +1413,7 @@ async function submitSyntheticPrompt(content: string, sidebarNote: string) {
     return;
   }
 
-  appendEntry("user", content);
+  await appendEntry("user", content);
   pushConversationMessage({
     role: "user",
     content,
@@ -1484,7 +1523,7 @@ async function runWorktreeCommand() {
 function runHelpCommand() {
   commandDraft = "";
   setMode("normal");
-  appendSystemMessage(describeHelpOptions(currentModel));
+  void appendSystemMessage(describeHelpOptions(currentModel));
   updateSidebar("Displayed available commands.");
   renderer.requestRender();
   scrollToBottom(true);
@@ -1601,7 +1640,7 @@ async function executeShellInput(raw: string, visibility: ShellVisibility) {
 
   const shellConstraintViolation = checkManualShellConstraints(sessionConstraintState);
   if (shellConstraintViolation) {
-    appendEntry("error", shellConstraintViolation);
+    await appendEntry("error", shellConstraintViolation);
     updateSidebar("Shell command blocked by session constraints.");
     renderer.requestRender();
     scrollToBottom(true);
@@ -1609,7 +1648,7 @@ async function executeShellInput(raw: string, visibility: ShellVisibility) {
   }
 
   let shellResult = createInitialShellExecutionResult();
-  const shellEntry = createShellTranscriptEntry({
+  const shellEntry = await createShellTranscriptEntry({
     command,
     visibility,
     transcriptHistory,
@@ -1694,13 +1733,13 @@ async function runAgentLoop() {
             stopThinkingIndicator,
             updateSidebar,
             sendStreamStateEvent,
-            appendAssistantContent: (contentChunk) =>
-              appendAssistantStreamContent({
+            appendAssistantContent: async (contentChunk) =>
+              await appendAssistantStreamContent({
                 state,
                 contentChunk,
                 transcriptHistory,
-                ensureEntry: () =>
-                  ensureAssistantStreamEntry({
+                ensureEntry: async () =>
+                  await ensureAssistantStreamEntry({
                     state,
                     appendEntry: (role, content, options) =>
                       appendEntry(role, content, options),
@@ -1716,19 +1755,20 @@ async function runAgentLoop() {
           }),
         onResponseMessages: async (responseMessages, state) => {
           latestTotalTokensUsed = state.totalTokensUsed;
-          applyFinalAssistantTextIfNeeded({
+          await applyFinalAssistantTextIfNeeded({
             state,
             responseMessages,
-            appendEntry: (role, content) =>
-              appendEntry(role, content, {
+            appendEntry: async (role, content) => {
+              await appendEntry(role, content, {
                 insertBeforeEntryId: state.insertAfterEntryId ?? undefined,
-              }),
+              });
+            },
           });
           updateSidebar();
           await persistActiveConversation();
-          return shouldContinueAfterResponse(state, responseMessages, (role, content) =>
-            appendEntry(role, content)
-          );
+          return await shouldContinueAfterResponse(state, responseMessages, async (role, content) => {
+            await appendEntry(role, content);
+          });
         },
         onAborted: () => {
           updateSidebar("Streaming aborted.");
@@ -1749,7 +1789,7 @@ async function runAgentLoop() {
     }
 
     const message = error instanceof Error ? error.message : String(error);
-    appendEntry("error", `Request failed.\n\n${message}`);
+    await appendEntry("error", `Request failed.\n\n${message}`);
     updateSidebar(
       "Request failed. Check your model selection and AI provider credentials."
     );
@@ -1833,7 +1873,7 @@ async function submitPrompt() {
     inputHistoryPath: INPUT_HISTORY_PATH,
   });
 
-  appendEntry("user", content);
+  await appendEntry("user", content);
   pushConversationMessage({
     role: "user",
     content,

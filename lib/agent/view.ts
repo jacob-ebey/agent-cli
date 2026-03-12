@@ -1,5 +1,6 @@
 import {
   BoxRenderable,
+  DiffRenderable,
   ScrollBoxRenderable,
   TextRenderable,
   TextareaRenderable,
@@ -168,6 +169,17 @@ export function createAgentView(renderer: ConstructorParameters<typeof BoxRender
     fg: "#dcfce7",
   });
 
+  const upmergePreviewDiff = new DiffRenderable(renderer, {
+    id: "upmerge-preview-diff",
+    diff: "",
+    width: "100%",
+    height: "100%",
+    filetype: "diff",
+    wrapMode: "none",
+    showLineNumbers: true,
+    fg: "#dcfce7",
+  });
+
   upmergePreview.add(upmergePreviewText);
   upmergePanel.add(upmergePreview);
 
@@ -289,6 +301,7 @@ export function createAgentView(renderer: ConstructorParameters<typeof BoxRender
     upmergePanel,
     upmergePreview,
     upmergePreviewText,
+    upmergePreviewDiff,
     historyPanel,
     historyPreview,
     historyPreviewText,
