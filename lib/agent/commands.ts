@@ -2,17 +2,33 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
-import { generateTextResponse, streamResponse, type Message, type Tool } from "../llm.ts";
+import {
+  generateTextResponse,
+  streamResponse,
+  type Message,
+  type Tool,
+} from "../llm.ts";
 import { indexSkills } from "../skills-index.ts";
-import { MODEL_PRESETS, ROOT_AGENTS_PATH, WORKSPACE_ROOT } from "./constants.ts";
+import {
+  MODEL_PRESETS,
+  ROOT_AGENTS_PATH,
+  WORKSPACE_ROOT,
+} from "./constants.ts";
 import {
   DEFAULT_SESSION_CONSTRAINTS,
   applyConstraintUpdates,
   formatConstraintsSummary,
   parseConstraintsCommand,
 } from "./constraints.ts";
-import { getActiveWorkspaceRoot, mergeSourceIntoWorktree } from "../../worktree.ts";
-import { buildConversationSummaryPrompt, createSummarizedConversationState, hasMeaningfulTranscript } from "./summarize.ts";
+import {
+  getActiveWorkspaceRoot,
+  mergeSourceIntoWorktree,
+} from "../../worktree.ts";
+import {
+  buildConversationSummaryPrompt,
+  createSummarizedConversationState,
+  hasMeaningfulTranscript,
+} from "./summarize.ts";
 import { resolveModelCommand } from "./model-menu.ts";
 import { appendChunkWithLimit, extractAssistantText } from "./utils.ts";
 import type {
@@ -44,6 +60,8 @@ export function describeHelpOptions(currentModel: string) {
     ":summarize  compress the current chat history",
     ":worktree   copy the active absolute workspace/worktree path",
     ":quit       exit the UI",
+    "",
+    "agent-cli was created by Jacob Ebey and agent-cli.",
     "",
     describeModelOptions(currentModel),
   ].join("\n");
@@ -120,7 +138,9 @@ export function buildAgentsMdSystemPrompt() {
   ].join("\n");
 }
 
-function buildAgentsMdReadonlyTools(loadedTools: Map<string, LoadedTool>): Tool[] {
+function buildAgentsMdReadonlyTools(
+  loadedTools: Map<string, LoadedTool>,
+): Tool[] {
   const readonlyToolNames = new Set([
     "list_project_tree",
     "read_file",
@@ -145,7 +165,11 @@ function buildAgentsMdReadonlyTools(loadedTools: Map<string, LoadedTool>): Tool[
         description: tool.definition.description,
         inputSchema: tool.definition.inputSchema,
         execute: async (input: unknown) =>
-          tool.execute(typeof input === "object" && input !== null ? (input as Record<string, unknown>) : {}),
+          tool.execute(
+            typeof input === "object" && input !== null
+              ? (input as Record<string, unknown>)
+              : {},
+          ),
       } satisfies Tool;
     });
 }
@@ -157,7 +181,9 @@ function parseAgentsContextResult(output: unknown): AgentsContextResult | null {
 
   try {
     const parsed = JSON.parse(output) as { markdown?: unknown };
-    return typeof parsed.markdown === "string" ? { markdown: parsed.markdown } : null;
+    return typeof parsed.markdown === "string"
+      ? { markdown: parsed.markdown }
+      : null;
   } catch {
     return null;
   }
@@ -188,7 +214,7 @@ export async function runAgentsMdCommand(options: {
 }) {
   if (options.busy) {
     options.updateSidebar(
-      "Wait for the current stream or shell command to finish before generating AGENTS.md."
+      "Wait for the current stream or shell command to finish before generating AGENTS.md.",
     );
     options.requestRender();
     return;
@@ -197,7 +223,9 @@ export async function runAgentsMdCommand(options: {
   options.setCommandDraft("");
   options.setBusy(true);
   options.setModeNormal();
-  options.startThinkingIndicator(`Generating AGENTS.md with ${options.currentModel}...`);
+  options.startThinkingIndicator(
+    `Generating AGENTS.md with ${options.currentModel}...`,
+  );
   options.updateSidebar(`Generating AGENTS.md with ${options.currentModel}...`);
   options.updateComposerHint();
   options.requestRender();
@@ -214,7 +242,8 @@ export async function runAgentsMdCommand(options: {
     ...options.initialToolMessages,
     {
       role: "user",
-      content: "Create or update the repository root AGENTS.md by inspecting the repository and then calling `create_agents_context` with the final markdown.",
+      content:
+        "Create or update the repository root AGENTS.md by inspecting the repository and then calling `create_agents_context` with the final markdown.",
     },
   ];
 
@@ -241,18 +270,24 @@ export async function runAgentsMdCommand(options: {
         }
         case "tool-call-start":
           options.stopThinkingIndicator();
-          options.updateSidebar(`AGENTS.md sub-agent requested ${chunk.toolName}...`);
+          options.updateSidebar(
+            `AGENTS.md sub-agent requested ${chunk.toolName}...`,
+          );
           break;
         case "tool-call-delta":
           options.stopThinkingIndicator();
-          options.updateSidebar(`AGENTS.md sub-agent is preparing ${chunk.toolName} input...`);
+          options.updateSidebar(
+            `AGENTS.md sub-agent is preparing ${chunk.toolName} input...`,
+          );
           break;
         case "tool-result": {
           options.stopThinkingIndicator();
           if (chunk.toolName === "create_agents_context") {
             const parsed = parseAgentsContextResult(chunk.output);
             if (!parsed) {
-              throw new Error("create_agents_context returned an invalid result.");
+              throw new Error(
+                "create_agents_context returned an invalid result.",
+              );
             }
             finalMarkdown = parsed.markdown;
           }
@@ -265,11 +300,12 @@ export async function runAgentsMdCommand(options: {
     conversation.push(...responseMessages);
 
     if (!finalMarkdown) {
-      const fallbackText = extractAssistantText(responseMessages).trim() || assistantText.trim();
+      const fallbackText =
+        extractAssistantText(responseMessages).trim() || assistantText.trim();
       throw new Error(
         fallbackText
           ? `AGENTS.md sub-agent finished without calling create_agents_context.\n\nLast assistant output:\n${fallbackText}`
-          : "AGENTS.md sub-agent finished without calling create_agents_context."
+          : "AGENTS.md sub-agent finished without calling create_agents_context.",
       );
     }
 
@@ -279,7 +315,7 @@ export async function runAgentsMdCommand(options: {
         `Created or updated \`${path.relative(WORKSPACE_ROOT, ROOT_AGENTS_PATH) || "AGENTS.md"}\`.`,
         "",
         "The AGENTS.md sub-agent completed using read-only discovery tools and returned final markdown via `create_agents_context`.",
-      ].join("\n")
+      ].join("\n"),
     );
     options.updateSidebar("AGENTS.md updated.");
   } catch (error) {
@@ -297,7 +333,7 @@ export async function runAgentsMdCommand(options: {
 
 export function describeModelOptions(currentModel: string) {
   const presetLines = Object.entries(MODEL_PRESETS).map(
-    ([name, modelId]) => `:model ${name.padEnd(10, " ")} ${modelId}`
+    ([name, modelId]) => `:model ${name.padEnd(10, " ")} ${modelId}`,
   );
 
   return [
@@ -319,7 +355,17 @@ export async function summarizeConversationCommand(options: {
   setBusy: (busy: boolean) => void;
   setModeNormal: () => void;
   startThinkingIndicator: (note: string) => void;
-  sendStreamStateEvent: (event: "start-connection" | "connection-established" | "receive-reasoning" | "receive-content" | "await-approval" | "approval-resolved" | "complete" | "reset") => void;
+  sendStreamStateEvent: (
+    event:
+      | "start-connection"
+      | "connection-established"
+      | "receive-reasoning"
+      | "receive-content"
+      | "await-approval"
+      | "approval-resolved"
+      | "complete"
+      | "reset",
+  ) => void;
   updateSidebar: (note: string) => void;
   appendSystemMessage: (content: string) => void;
   appendEntry: (role: "error", content: string) => void;
@@ -336,7 +382,7 @@ export async function summarizeConversationCommand(options: {
 }) {
   if (options.busy) {
     options.updateSidebar(
-      "Wait for the current stream or shell command to finish before summarizing."
+      "Wait for the current stream or shell command to finish before summarizing.",
     );
     options.requestRender();
     return;
@@ -353,9 +399,13 @@ export async function summarizeConversationCommand(options: {
   options.setBusy(true);
   options.sendStreamStateEvent("start-connection");
   options.setModeNormal();
-  options.startThinkingIndicator(`Summarizing conversation with ${options.currentModel}...`);
+  options.startThinkingIndicator(
+    `Summarizing conversation with ${options.currentModel}...`,
+  );
   options.sendStreamStateEvent("connection-established");
-  options.updateSidebar(`Summarizing conversation with ${options.currentModel}...`);
+  options.updateSidebar(
+    `Summarizing conversation with ${options.currentModel}...`,
+  );
 
   try {
     const summary = await generateTextResponse({
@@ -376,17 +426,20 @@ export async function summarizeConversationCommand(options: {
     if (!summary) {
       options.appendEntry(
         "error",
-        "Conversation summarization returned an empty response. The existing chat history was left unchanged."
+        "Conversation summarization returned an empty response. The existing chat history was left unchanged.",
       );
-      options.updateSidebar("Conversation summarization returned an empty response.");
+      options.updateSidebar(
+        "Conversation summarization returned an empty response.",
+      );
       return;
     }
 
     options.replaceWithSummarizedState(
       createSummarizedConversationState({
         summary,
-        createInitialConversationMessages: options.createInitialConversationMessages,
-      })
+        createInitialConversationMessages:
+          options.createInitialConversationMessages,
+      }),
     );
     options.restoreTranscriptFromHistory();
     await options.persistActiveConversation();
@@ -395,7 +448,7 @@ export async function summarizeConversationCommand(options: {
     const message = error instanceof Error ? error.message : String(error);
     options.appendEntry(
       "error",
-      `Conversation summarization failed. Existing history was left unchanged.\n\n${message}`
+      `Conversation summarization failed. Existing history was left unchanged.\n\n${message}`,
     );
     options.updateSidebar("Conversation summarization failed.");
   } finally {
@@ -419,7 +472,8 @@ export async function showPlanCommand(options: {
   options.setModeNormal();
 
   const displayPath =
-    path.relative(getActiveWorkspaceRoot(), options.planPath) || ".agents/PLAN.md";
+    path.relative(getActiveWorkspaceRoot(), options.planPath) ||
+    ".agents/PLAN.md";
 
   if (options.copyPath) {
     const platform = process.platform;
@@ -433,17 +487,23 @@ export async function showPlanCommand(options: {
         try {
           await spawnClipboardCommand("wl-copy", [], options.planPath);
         } catch {
-          await spawnClipboardCommand("xclip", ["-selection", "clipboard"], options.planPath);
+          await spawnClipboardCommand(
+            "xclip",
+            ["-selection", "clipboard"],
+            options.planPath,
+          );
         }
       }
 
-      options.appendSystemMessage(`Copied ${displayPath} path to clipboard.\n\n\`${options.planPath}\``);
+      options.appendSystemMessage(
+        `Copied ${displayPath} path to clipboard.\n\n\`${options.planPath}\``,
+      );
       options.updateSidebar(`Copied ${displayPath} path to clipboard.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       options.appendEntry(
         "error",
-        `Failed to copy the ${displayPath} path to the clipboard.\n\nPath:\n\`${options.planPath}\`\n\n${message}`
+        `Failed to copy the ${displayPath} path to the clipboard.\n\nPath:\n\`${options.planPath}\`\n\n${message}`,
       );
       options.updateSidebar(`Failed to copy ${displayPath} path to clipboard.`);
     }
@@ -457,17 +517,24 @@ export async function showPlanCommand(options: {
     options.appendSystemMessage(
       trimmed
         ? `Current ${displayPath}\n\n${trimmed}`
-        : `Current ${displayPath} is empty.`
+        : `Current ${displayPath} is empty.`,
     );
     options.updateSidebar(`Displayed current ${displayPath}.`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    options.appendEntry("error", `Failed to read ${displayPath}.\n\n${message}`);
+    options.appendEntry(
+      "error",
+      `Failed to read ${displayPath}.\n\n${message}`,
+    );
     options.updateSidebar(`Failed to read ${displayPath}.`);
   }
 }
 
-async function spawnClipboardCommand(command: string, args: string[], input: string) {
+async function spawnClipboardCommand(
+  command: string,
+  args: string[],
+  input: string,
+) {
   return await new Promise<void>((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ["pipe", "ignore", "pipe"],
@@ -485,7 +552,9 @@ async function spawnClipboardCommand(command: string, args: string[], input: str
         resolve();
         return;
       }
-      reject(new Error(stderr.trim() || `${command} exited with code ${code ?? 0}.`));
+      reject(
+        new Error(stderr.trim() || `${command} exited with code ${code ?? 0}.`),
+      );
     });
 
     child.stdin?.end(input);
@@ -514,17 +583,23 @@ export async function copyWorktreePathCommand(options: {
       try {
         await spawnClipboardCommand("wl-copy", [], options.worktreePath);
       } catch {
-        await spawnClipboardCommand("xclip", ["-selection", "clipboard"], options.worktreePath);
+        await spawnClipboardCommand(
+          "xclip",
+          ["-selection", "clipboard"],
+          options.worktreePath,
+        );
       }
     }
 
-    options.appendSystemMessage(`Copied active workspace path to clipboard.\n\n\`${options.worktreePath}\``);
+    options.appendSystemMessage(
+      `Copied active workspace path to clipboard.\n\n\`${options.worktreePath}\``,
+    );
     options.updateSidebar("Copied active workspace path to clipboard.");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     options.appendEntry(
       "error",
-      `Failed to copy the active workspace path to the clipboard.\n\nPath:\n\`${options.worktreePath}\`\n\n${message}`
+      `Failed to copy the active workspace path to the clipboard.\n\nPath:\n\`${options.worktreePath}\`\n\n${message}`,
     );
     options.updateSidebar("Failed to copy active workspace path to clipboard.");
   }
@@ -563,7 +638,7 @@ export async function runMergeWorktreeCommand(options: {
         "- :merge",
         "- :merge origin/main",
         "- :merge origin main",
-      ].join("\n")
+      ].join("\n"),
     );
     options.updateSidebar("Invalid merge arguments.");
     return;
@@ -646,7 +721,7 @@ export async function runConstraintsCommand(options: {
     const parsed = parseConstraintsCommand(options.argument);
     if (parsed.kind === "show") {
       options.appendSystemMessage(
-        `Current session constraints\n\n${formatConstraintsSummary(options.currentConstraints)}`
+        `Current session constraints\n\n${formatConstraintsSummary(options.currentConstraints)}`,
       );
       options.updateSidebar("Displayed current session constraints.");
       return;
@@ -655,16 +730,19 @@ export async function runConstraintsCommand(options: {
     if (parsed.kind === "reset") {
       options.setConstraints({ ...DEFAULT_SESSION_CONSTRAINTS });
       options.appendSystemMessage(
-        `Reset session constraints\n\n${formatConstraintsSummary(DEFAULT_SESSION_CONSTRAINTS)}`
+        `Reset session constraints\n\n${formatConstraintsSummary(DEFAULT_SESSION_CONSTRAINTS)}`,
       );
       options.updateSidebar("Reset session constraints.");
       return;
     }
 
-    const nextConstraints = applyConstraintUpdates(options.currentConstraints, parsed.updates);
+    const nextConstraints = applyConstraintUpdates(
+      options.currentConstraints,
+      parsed.updates,
+    );
     options.setConstraints(nextConstraints);
     options.appendSystemMessage(
-      `Updated session constraints\n\n${formatConstraintsSummary(nextConstraints)}`
+      `Updated session constraints\n\n${formatConstraintsSummary(nextConstraints)}`,
     );
     options.updateSidebar("Updated session constraints.");
   } catch (error) {
@@ -682,7 +760,7 @@ export async function runConstraintsCommand(options: {
         "- :constraints read-only=true",
         "- :constraints shell=deny network=deny",
         "- :constraints max-files=2 require-validation=true",
-      ].join("\n")
+      ].join("\n"),
     );
     options.updateSidebar("Invalid constraints command.");
   }
@@ -711,7 +789,7 @@ export async function runIndexCommand(options: {
         `Skill files: ${new Set(index.chunks.map((chunk) => chunk.path)).size}.`,
         `Saved embeddings to \`.agents/skills-index.json\`.`,
         `Embedding model: \`${index.embeddingModel}\`.`,
-      ].join("\n")
+      ].join("\n"),
     );
     options.updateSidebar("Skill index refreshed.");
   } catch (error) {

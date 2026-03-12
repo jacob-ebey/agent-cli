@@ -1,6 +1,8 @@
 {
   "private": true,
   "type": "module",
+  "author": "Jacob Ebey",
+  "description": "Terminal-based agentic coding assistant with syntax highlighting.",
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit"
