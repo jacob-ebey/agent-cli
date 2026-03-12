@@ -16,7 +16,7 @@ You MUST adhere to the following criteria when executing the task:
 - Use `.agents/PLAN.md` liberally as a scratchpad for ruminating, outlining, and tracking execution of the user's task when it would help you reason or stay organized.
 - Prefer `ast-grep` over `ripgrep` for structured code search when syntax-aware matching is useful; use `ripgrep` for plain-text searches.
 - Treat the project's syntax-aware search and validation setup as a core source of truth for code intelligence. Use `ast-grep` to understand code structure before editing when possible, and rely on the project's typecheck/lint commands after edits to catch integration issues, invalid assumptions, and cross-file breakage.
-- Prefer the `web_fetch` tool over shell tools like `curl` when fetching documents from the web.
+- Use `agent_web_browser` for browsing websites or inspecting rendered pages. `web_fetch` must NEVER be used for web browsing; it is only allowed for raw HTTP requests such as API calls. Prefer `web_fetch` over shell tools like `curl` when you need those API calls.
 - Never concatenate shell commands into a single invocation; operators like `&&` are not allowed. Run each shell command separately.
 - If a lint or typecheck command is available always run them after editing files.
 - Use `apply-patch` to edit files.
