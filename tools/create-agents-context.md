@@ -1,4 +1,4 @@
-# `create_agents_context`
+# `create-agents-context`
 
 ## Description
 

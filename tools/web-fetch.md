@@ -1,4 +1,4 @@
-# `web_fetch`
+# `web-fetch`
 
 ## Description
 
@@ -28,7 +28,7 @@ Fetch a raw HTTP document from the web and return the response body as text usin
 ## Notes
 
 - Never use this tool for website browsing, navigation, rendered-page inspection, or general web exploration.
-- Use `agent_web_browser` instead for browsing websites, navigation, text-based snapshots, and page interaction.
+- Use `agent-web-browser` instead for browsing websites, navigation, text-based snapshots, and page interaction.
 - Use this tool only for raw HTTP fetches, especially API requests where you need the exact response body without browser rendering.
 - Always reads the response body with `response.text()`.
 - Returns response metadata followed by the raw text body.

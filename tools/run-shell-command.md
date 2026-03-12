@@ -1,4 +1,4 @@
-# `run_shell_command`
+# `run-shell-command`
 
 ## Description
 

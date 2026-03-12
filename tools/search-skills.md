@@ -1,8 +1,8 @@
-# `search_skills`
+# `search-skills`
 
 ## Description
 
-Search the indexed `.agents/skills/*/SKILL.md` files using embeddings similarity over small skill chunks. Use this first to discover relevant skills, inspect the returned blurbs and line ranges, and then load the full file with `read_file` when needed.
+Search the indexed `.agents/skills/*/SKILL.md` files using embeddings similarity over small skill chunks. Use this first to discover relevant skills, inspect the returned blurbs and line ranges, and then load the full file with `read-file` when needed.
 
 ## Parameters
 

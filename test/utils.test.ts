@@ -83,7 +83,7 @@ test("constraint enforcement blocks edits shell and network when configured", ()
   expect(checkManualShellConstraints(state)).toContain("shell=deny");
   expect(
     checkToolConstraints({
-      toolName: "run_shell_command",
+      toolName: "run-shell-command",
       targetPath: null,
       state,
     })
@@ -92,7 +92,7 @@ test("constraint enforcement blocks edits shell and network when configured", ()
   state.constraints.networkPolicy = "deny";
   expect(
     checkToolConstraints({
-      toolName: "web_fetch",
+      toolName: "web-fetch",
       targetPath: null,
       state,
     })
@@ -185,7 +185,7 @@ test("extractTextParts and extractAssistantText ignore non-text content", () => 
     {
       type: "tool-call",
       toolCallId: "call-1",
-      toolName: "read_file",
+      toolName: "read-file",
       input: {},
     },
     { type: "text", text: " world" },
@@ -208,7 +208,7 @@ test("tool-call detectors find the last assistant tool call", () => {
         {
           type: "tool-call",
           toolCallId: "call-1",
-          toolName: "read_file",
+          toolName: "read-file",
           input: {},
         },
       ],
@@ -224,7 +224,7 @@ test("tool-call detectors find the last assistant tool call", () => {
           {
             type: "tool-call",
             toolCallId: "call-2",
-            toolName: "read_file",
+            toolName: "read-file",
             input: {},
           },
         ],
@@ -261,7 +261,7 @@ test("stream phase leaves connecting on first tool activity", async () => {
   const chunk: ResponseChunk = {
     type: "tool-call-start",
     toolCallId: "call-1",
-    toolName: "read_file",
+    toolName: "read-file",
   };
 
   await handleResponseChunk({
@@ -289,7 +289,7 @@ test("stream phase leaves connecting on tool input deltas", async () => {
     chunk: {
       type: "tool-call-delta",
       toolCallId: "call-1",
-      toolName: "read_file",
+      toolName: "read-file",
       argumentsDelta: '{"path":"README.md"}',
     },
     state: createAssistantStreamState(),

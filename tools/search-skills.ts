@@ -36,6 +36,6 @@ export const execute: ToolHandler = async (argumentsObject) => {
           .join("\n\n")
       : "No indexed skills matched the query.",
     "",
-    "Use `read_file` with the skill path when you need the full file.",
+    "Use `read-file` with the skill path when you need the full file.",
   ].join("\n");
 };

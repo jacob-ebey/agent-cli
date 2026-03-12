@@ -1,4 +1,4 @@
-# `list_project_tree`
+# `list-project-tree`
 
 ## Description
 

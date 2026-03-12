@@ -51,7 +51,7 @@ export async function getApprovalTarget(
     }
   }
 
-  if (toolName === "remove_file") {
+  if (toolName === "remove-file") {
     const requestedPath = readStringArgument(argumentsObject, "path");
     if (!requestedPath) {
       return null;

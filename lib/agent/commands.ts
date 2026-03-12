@@ -71,12 +71,12 @@ export function buildAgentsMdSystemPrompt() {
   return [
     "You are a focused sub-agent that generates the repository's root AGENTS.md content.",
     "",
-    "You do not edit files directly. Your only job is to inspect the repository with the allowed tools and then call `create_agents_context` exactly once with the final markdown.",
+    "You do not edit files directly. Your only job is to inspect the repository with the allowed tools and then call `create-agents-context` exactly once with the final markdown.",
     "",
     "Tool constraints:",
-    "- You only have read-only discovery tools plus `create_agents_context`.",
+    "- You only have read-only discovery tools plus `create-agents-context`.",
     "- Do not attempt file edits, shell commands, or any write action.",
-    "- End the loop by calling `create_agents_context` with the full AGENTS.md content.",
+    "- End the loop by calling `create-agents-context` with the full AGENTS.md content.",
     "",
     "Primary goal:",
     "- Produce a compact, high-signal AGENTS.md rooted in facts discoverable from the repository.",
@@ -90,9 +90,9 @@ export function buildAgentsMdSystemPrompt() {
     "",
     "Initial context is already provided via:",
     "- the standard repository system prompt",
-    "- an initial `list_project_tree` call",
-    "- an initial `read_file` of `package.json`",
-    "- an initial `read_file` of `AGENTS.md` when available",
+    "- an initial `list-project-tree` call",
+    "- an initial `read-file` of `package.json`",
+    "- an initial `read-file` of `AGENTS.md` when available",
     "",
     "Suggested workflow:",
     "1. Inspect package manifests, README/docs, and a small curated repository tree.",
@@ -100,7 +100,7 @@ export function buildAgentsMdSystemPrompt() {
     "3. Infer the repo map and major subsystems from actual files.",
     "4. Extract important invariants, workflows, and sharp edges from code and docs.",
     "5. Read any existing AGENTS.md and preserve project-specific guidance that remains valid.",
-    "6. Call `create_agents_context` with a concise AGENTS.md markdown document.",
+    "6. Call `create-agents-context` with a concise AGENTS.md markdown document.",
     "",
     "Target content budget:",
     "- Aim for roughly 80-200 lines.",
@@ -128,13 +128,13 @@ export function buildAgentsMdSystemPrompt() {
     "- Call out validation commands that should be run after edits.",
     "",
     "Output requirements:",
-    "- The `markdown` field passed to `create_agents_context` must be the complete AGENTS.md file contents.",
+    "- The `markdown` field passed to `create-agents-context` must be the complete AGENTS.md file contents.",
     "- Write polished markdown with short headings and concise bullets.",
     "- Keep the document useful to another agent, not promotional to humans.",
     "- Avoid copying large README sections verbatim.",
     "",
     "Stop condition:",
-    "- Finish only by calling `create_agents_context` once you have the final AGENTS.md content.",
+    "- Finish only by calling `create-agents-context` once you have the final AGENTS.md content.",
   ].join("\n");
 }
 
@@ -142,14 +142,14 @@ function buildAgentsMdReadonlyTools(
   loadedTools: Map<string, LoadedTool>,
 ): Tool[] {
   const readonlyToolNames = new Set([
-    "list_project_tree",
-    "read_file",
-    "search_skills",
-    "web_fetch",
-    "web_search",
+    "list-project-tree",
+    "read-file",
+    "search-skills",
+    "web-fetch",
+    "web-search",
     "ripgrep",
     "ast-grep",
-    "create_agents_context",
+    "create-agents-context",
   ]);
 
   return Array.from(loadedTools.values(), (tool) => tool.definition.name)
@@ -243,7 +243,7 @@ export async function runAgentsMdCommand(options: {
     {
       role: "user",
       content:
-        "Create or update the repository root AGENTS.md by inspecting the repository and then calling `create_agents_context` with the final markdown.",
+        "Create or update the repository root AGENTS.md by inspecting the repository and then calling `create-agents-context` with the final markdown.",
     },
   ];
 
@@ -282,11 +282,11 @@ export async function runAgentsMdCommand(options: {
           break;
         case "tool-result": {
           options.stopThinkingIndicator();
-          if (chunk.toolName === "create_agents_context") {
+          if (chunk.toolName === "create-agents-context") {
             const parsed = parseAgentsContextResult(chunk.output);
             if (!parsed) {
               throw new Error(
-                "create_agents_context returned an invalid result.",
+                "create-agents-context returned an invalid result.",
               );
             }
             finalMarkdown = parsed.markdown;
@@ -304,8 +304,8 @@ export async function runAgentsMdCommand(options: {
         extractAssistantText(responseMessages).trim() || assistantText.trim();
       throw new Error(
         fallbackText
-          ? `AGENTS.md sub-agent finished without calling create_agents_context.\n\nLast assistant output:\n${fallbackText}`
-          : "AGENTS.md sub-agent finished without calling create_agents_context.",
+          ? `AGENTS.md sub-agent finished without calling create-agents-context.\n\nLast assistant output:\n${fallbackText}`
+          : "AGENTS.md sub-agent finished without calling create-agents-context.",
       );
     }
 
@@ -314,7 +314,7 @@ export async function runAgentsMdCommand(options: {
       [
         `Created or updated \`${path.relative(WORKSPACE_ROOT, ROOT_AGENTS_PATH) || "AGENTS.md"}\`.`,
         "",
-        "The AGENTS.md sub-agent completed using read-only discovery tools and returned final markdown via `create_agents_context`.",
+        "The AGENTS.md sub-agent completed using read-only discovery tools and returned final markdown via `create-agents-context`.",
       ].join("\n"),
     );
     options.updateSidebar("AGENTS.md updated.");

@@ -211,7 +211,7 @@ export function summarizeToolResult(
   const argumentsObject = isRecord(input) ? input : {};
 
   switch (toolName) {
-    case "read_file": {
+    case "read-file": {
       const requestedPath = readStringArgument(argumentsObject, "path");
       const offset = readIntegerArgument(argumentsObject, "offset");
       const limit = readIntegerArgument(argumentsObject, "limit");
@@ -248,7 +248,7 @@ export function summarizeToolResult(
         .filter(Boolean)
         .join("\n");
     }
-    case "search_skills": {
+    case "search-skills": {
       const query = readStringArgument(argumentsObject, "query");
       const indexedChunks = matchOutputLabel(output, "Indexed chunks");
       const resultsCount =
@@ -266,7 +266,7 @@ export function summarizeToolResult(
         .filter(Boolean)
         .join("\n");
     }
-    case "run_shell_command": {
+    case "run-shell-command": {
       const command = readStringArgument(argumentsObject, "command");
       const requestedPath = readStringArgument(argumentsObject, "cwd") ?? ".";
       const exitCode = matchOutputLabel(output, "Exit code");

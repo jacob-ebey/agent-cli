@@ -168,7 +168,7 @@ Rules for command entries:
 
 Behavior notes:
 
-- `approvedCommands` affects shell approval prompts for `run_shell_command`.
+- `approvedCommands` affects shell approval prompts for `run-shell-command`.
 - A trailing-`*` entry matches any command with that prefix. For example, `bun test*` matches `bun test` and `bun test test/event-stream-decoder.test.ts`.
 - The CLI preserves `startupCommands` when it updates saved approvals.
 - Startup commands may run inside the active agent-managed worktree when one exists.

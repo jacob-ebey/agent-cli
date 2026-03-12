@@ -251,7 +251,7 @@ const tools = Array.from(loadedTools.values(), (tool) => ({
       if (tool.definition.name === "apply-patch" && approvalTarget?.approvalPersistence === "session") {
         recordSuccessfulEdit(approvalTarget.approvalKey, sessionConstraintState);
       }
-      if (tool.definition.name === "run_shell_command") {
+      if (tool.definition.name === "run-shell-command") {
         const command = readStringArgument(parsedArguments, "command");
         if (command) {
           recordSuccessfulShellCommand(command, sessionConstraintState);

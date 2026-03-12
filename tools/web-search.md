@@ -1,4 +1,4 @@
-# `web_search`
+# `web-search`
 
 ## Description
 

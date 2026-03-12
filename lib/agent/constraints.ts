@@ -152,7 +152,7 @@ export function applyConstraintUpdates(
 }
 
 export function isNetworkTool(toolName: string) {
-  return toolName === "web_fetch" || toolName === "web_search";
+  return toolName === "web-fetch" || toolName === "web-search";
 }
 
 export function isValidationCommand(command: string) {
@@ -183,7 +183,7 @@ export function checkToolConstraints(options: {
     }
   }
 
-  if (toolName === "run_shell_command" && constraints.shellPolicy === "deny") {
+  if (toolName === "run-shell-command" && constraints.shellPolicy === "deny") {
     return "Blocked by session constraints: shell=deny prevents shell commands.";
   }
 
