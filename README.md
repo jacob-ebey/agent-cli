@@ -68,25 +68,116 @@ cd agent-cli
 bun install
 ```
 
-3. Set the required environment variables for remote OpenAI-compatible access.
+3. Configure the runtime.
+
+At minimum, set the environment variables for whichever model backends you plan to use.
+
+### Environment variables
+
+#### Remote OpenAI-compatible access
+
+These are required if you want to use remote models such as the built-in `openai:*`, `anthropic:*`, or `google:*` presets through an OpenAI-compatible gateway.
 
 ```bash
 export OPENAI_API_BASE="<your-openai-compatible-base-url>"
 export OPENAI_API_KEY="<your-api-key>"
 ```
 
-Optional environment variables:
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `OPENAI_API_BASE` | for remote models | Base URL for your OpenAI-compatible API. The CLI normalizes this automatically and will append `/v1` when needed. |
+| `OPENAI_API_KEY` | for remote models | API key sent to the OpenAI-compatible provider. |
+| `OPENAI_EMBEDDING_MODEL` | optional | Embedding model used for skills indexing and search. Defaults to `text-embedding-3-small`. |
+
+Example:
 
 ```bash
+export OPENAI_API_BASE="https://your-gateway.example.com"
+export OPENAI_API_KEY="sk-..."
 export OPENAI_EMBEDDING_MODEL="text-embedding-3-small"
-export OLLAMA_API_BASE="http://127.0.0.1:11434"
 ```
 
 Notes:
 
-- `OPENAI_API_BASE` and `OPENAI_API_KEY` are required for remote OpenAI-compatible models.
-- `OPENAI_EMBEDDING_MODEL` controls the embedding model used for skill indexing and defaults to `text-embedding-3-small`.
+- Remote model access is unavailable unless both `OPENAI_API_BASE` and `OPENAI_API_KEY` are set.
+- Model listing for remote providers also depends on these two variables.
+- Skill indexing prefers the remote embedding backend when the OpenAI-compatible gateway is configured.
+
+#### Local Ollama access
+
+Ollama support works without the remote gateway variables.
+
+```bash
+export OLLAMA_API_BASE="http://127.0.0.1:11434"
+export OLLAMA_EMBEDDING_MODEL="nomic-embed-text"
+```
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `OLLAMA_API_BASE` | optional | Base URL for your Ollama server. Defaults to `http://127.0.0.1:11434`. |
+| `OLLAMA_EMBEDDING_MODEL` | optional | Embedding model used when the CLI falls back to Ollama-backed embeddings. Defaults to `nomic-embed-text`. |
+
+Notes:
+
 - `OLLAMA_API_BASE` is only needed if your Ollama server is not running at the default local address.
+- If the remote gateway is not configured, embeddings fall back to Ollama using `OLLAMA_EMBEDDING_MODEL`.
+
+### Workspace config files
+
+`agent-cli` keeps some state in workspace-managed files under `.agents/`.
+
+#### `.agents/shell.json`
+
+This file stores persisted shell command approvals and optional startup commands for the current workspace.
+
+Location:
+
+```text
+.agents/shell.json
+```
+
+Supported shape:
+
+```json
+{
+  "version": 1,
+  "approvedCommands": [
+    "bun typecheck",
+    "bun test*"
+  ],
+  "startupCommands": [
+    "pwd",
+    "git status"
+  ]
+}
+```
+
+Fields:
+
+- `version`: optional schema version written by the CLI. Current value is `1`.
+- `approvedCommands`: optional list of commands that no longer need per-run approval.
+- `startupCommands`: optional list of commands that may run automatically on startup.
+
+Rules for command entries:
+
+- Entries can be exact command strings such as `bun typecheck`.
+- Entries can also use a single trailing `*` as a prefix wildcard, such as `bun test*`.
+- Wildcards are only valid at the end of the string.
+- Invalid patterns such as `*bun test`, `bun*test`, or `bun**` are ignored when the file is loaded.
+- Empty strings and non-string values are ignored.
+
+Behavior notes:
+
+- `approvedCommands` affects shell approval prompts for `run_shell_command`.
+- A trailing-`*` entry matches any command with that prefix. For example, `bun test*` matches `bun test` and `bun test test/event-stream-decoder.test.ts`.
+- The CLI preserves `startupCommands` when it updates saved approvals.
+- Startup commands may run inside the active agent-managed worktree when one exists.
+- This file is workspace-local, so different repositories can have different approval policies.
+
+When to edit it manually:
+
+- Usually you do not need to. The CLI writes approvals here when a user chooses an “always allow” style approval.
+- Manual edits are reasonable if you want to preseed approved commands or startup commands for a repo.
 
 ## Optional: install Ollama
 
